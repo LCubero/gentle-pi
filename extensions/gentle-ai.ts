@@ -212,15 +212,7 @@ function readStringPath(value: unknown, path: string[]): string | undefined {
 }
 
 function isSddAgentStartEvent(event: unknown): boolean {
-	const candidates = [
-		readStringPath(event, ["agentName"]),
-		readStringPath(event, ["agent"]),
-		readStringPath(event, ["name"]),
-		readStringPath(event, ["agent", "name"]),
-		readStringPath(event, ["subagent", "name"]),
-	]
-		.filter((value): value is string => value !== undefined)
-		.map((value) => value.trim());
+	const candidates = readAgentStartNames(event);
 	if (candidates.some((value) => SDD_AGENT_NAME_SET.has(value))) return true;
 
 	const systemPrompt = readStringPath(event, ["systemPrompt"]) ?? "";
@@ -228,6 +220,23 @@ function isSddAgentStartEvent(event: unknown): boolean {
 		const phase = name.replace(/^sdd-/, "");
 		return new RegExp(`\\bSDD ${phase} executor\\b`, "i").test(systemPrompt);
 	});
+}
+
+function readAgentStartNames(event: unknown): string[] {
+	return [
+		readStringPath(event, ["agentName"]),
+		readStringPath(event, ["agent"]),
+		readStringPath(event, ["name"]),
+		readStringPath(event, ["agent", "name"]),
+		readStringPath(event, ["subagent", "name"]),
+	]
+		.filter((value): value is string => value !== undefined)
+		.map((value) => value.trim())
+		.filter((value) => value.length > 0);
+}
+
+function isNamedAgentStartEvent(event: unknown): boolean {
+	return readAgentStartNames(event).length > 0;
 }
 
 function evaluateDeniedCommand(
@@ -1270,13 +1279,21 @@ export default function gentleAi(pi: ExtensionAPI): void {
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
-		if (isSddAgentStartEvent(event) && !getSddPreflightPreferences(ctx)) {
+		const isSddAgent = isSddAgentStartEvent(event);
+		const isNamedAgent = isNamedAgentStartEvent(event);
+		if (isSddAgent && !getSddPreflightPreferences(ctx)) {
 			await runSddPreflight(ctx);
 		}
 		const prefs = getSddPreflightPreferences(ctx);
-		const sddPrompt = prefs ? `\n\n${renderSddPreflightPrompt(prefs)}` : "";
+		const sddPrompt =
+			prefs && (!isNamedAgent || isSddAgent)
+				? `\n\n${renderSddPreflightPrompt(prefs)}`
+				: "";
+		const gentlePrompt = isNamedAgent || isSddAgent
+			? ""
+			: `\n\n${buildGentlePrompt(readPersonaMode(ctx.cwd))}`;
 		return {
-			systemPrompt: `${event.systemPrompt}\n\n${buildGentlePrompt(readPersonaMode(ctx.cwd))}${sddPrompt}`,
+			systemPrompt: `${event.systemPrompt}${gentlePrompt}${sddPrompt}`,
 		};
 	});
 

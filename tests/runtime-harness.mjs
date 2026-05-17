@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { discoverAndLoadExtensions } from "@earendil-works/pi-coding-agent";
@@ -152,6 +152,16 @@ async function run() {
 	assert.ok(hooks.has("before_agent_start"), "missing before_agent_start hook");
 	assert.ok(hooks.has("tool_call"), "missing tool_call hook");
 
+	for (const entry of await readdir(join(ROOT, "assets", "agents"))) {
+		if (!entry.endsWith(".md")) continue;
+		const agentPrompt = await readFile(join(ROOT, "assets", "agents", entry), "utf8");
+		assert.doesNotMatch(
+			agentPrompt,
+			/inheritProjectContext:\s*true/,
+			`${entry} must not inherit parent project context by default`,
+		);
+	}
+
 	const discovered = await discoverAndLoadExtensions(["./extensions"], ROOT);
 	assert.deepEqual(
 		discovered.errors,
@@ -165,6 +175,11 @@ async function run() {
 		const promptResult = await promptHook({ systemPrompt: "base" }, createCtx(promptCwd));
 		assert.match(promptResult.systemPrompt, /base/);
 		assert.match(promptResult.systemPrompt, /el Gentleman/);
+		const subagentPromptResult = await promptHook(
+			{ agentName: "worker", systemPrompt: "worker base" },
+			createCtx(promptCwd),
+		);
+		assert.equal(subagentPromptResult.systemPrompt, "worker base");
 		assert.equal(
 			existsSync(join(promptCwd, ".pi", "agents", "sdd-apply.md")),
 			false,
@@ -306,6 +321,15 @@ async function run() {
 		const promptResult = await promptHook({ systemPrompt: "base" }, ctx);
 		assert.match(promptResult.systemPrompt, /SDD Session Preflight/);
 		assert.match(promptResult.systemPrompt, /Execution mode: interactive/);
+		const workerPromptResult = await promptHook(
+			{ agentName: "worker", systemPrompt: "worker base" },
+			ctx,
+		);
+		assert.equal(
+			workerPromptResult.systemPrompt,
+			"worker base",
+			"non-SDD subagents must not receive parent harness or SDD preflight prompts",
+		);
 	} finally {
 		await rm(lazySddCwd, { recursive: true, force: true });
 		await rm(globalModelsPath, { force: true });
@@ -337,9 +361,19 @@ async function run() {
 		assert.equal(existsSync(join(sddAgentGuardCwd, ".pi", "chains", "sdd-full.chain.md")), true);
 		assert.equal(ctx.ui.selections.length, 3);
 		assert.match(promptResult.systemPrompt, /SDD Session Preflight/);
+		assert.doesNotMatch(
+			promptResult.systemPrompt,
+			/el Gentleman Identity and Harness/,
+			"SDD executor startup must not receive the parent orchestrator prompt",
+		);
+		assert.doesNotMatch(
+			promptResult.systemPrompt,
+			/Work Routing Ladder/,
+			"SDD executor startup must not receive parent routing instructions",
+		);
 		assert.match(ctx.ui.notifications.at(-1).message, /SDD preflight complete/);
 
-		await promptHook(
+		const reusedPromptResult = await promptHook(
 			{
 				agentName: "sdd-tasks",
 				systemPrompt: "You are the SDD tasks executor for Gentle AI.",
@@ -347,6 +381,11 @@ async function run() {
 			ctx,
 		);
 		assert.equal(ctx.ui.selections.length, 3, "SDD agent guard should reuse session choices");
+		assert.doesNotMatch(
+			reusedPromptResult.systemPrompt,
+			/el Gentleman Identity and Harness/,
+			"named SDD executor startup must not receive the parent orchestrator prompt",
+		);
 	} finally {
 		await rm(sddAgentGuardCwd, { recursive: true, force: true });
 	}

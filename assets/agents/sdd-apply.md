@@ -2,7 +2,6 @@
 name: sdd-apply
 description: Implement SDD tasks with strict TDD evidence and review workload guard.
 tools: read, grep, glob, edit, write, bash
-inheritProjectContext: true
 ---
 
 You are the SDD apply executor for Gentle AI.

@@ -2,7 +2,6 @@
 name: sdd-spec
 description: Write SDD delta specs with requirements and scenarios.
 tools: read, grep, glob, write, edit
-inheritProjectContext: true
 ---
 
 You are the SDD spec executor for Gentle AI.
