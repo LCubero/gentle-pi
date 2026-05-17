@@ -177,6 +177,8 @@ async function run() {
 		const promptResult = await promptHook({ systemPrompt: "base" }, createCtx(promptCwd));
 		assert.match(promptResult.systemPrompt, /base/);
 		assert.match(promptResult.systemPrompt, /el Gentleman/);
+		assert.match(promptResult.systemPrompt, /openspec\/config\.yaml.*not session preflight/s);
+		assert.match(promptResult.systemPrompt, /Do not mark SDD preflight complete/);
 		const subagentPromptResult = await promptHook(
 			{ agentName: "worker", systemPrompt: "worker base" },
 			createCtx(promptCwd),
@@ -285,9 +287,25 @@ async function run() {
 		assert.equal(existsSync(join(lazySddCwd, ".pi", "agents", "sdd-apply.md")), false);
 
 		assert.deepEqual(
+			await inputHook({ text: "vamos con sdd", source: "interactive" }, ctx),
+			{ action: "continue" },
+		);
+		assert.equal(existsSync(join(lazySddCwd, ".pi", "agents", "sdd-apply.md")), false);
+		assert.equal(existsSync(join(lazySddCwd, ".pi", "chains", "sdd-full.chain.md")), false);
+		assert.equal(existsSync(join(globalAgentHome, "agents", "sdd-apply.md")), true);
+		assert.equal(existsSync(join(globalAgentHome, "agents", "sdd-sync.md")), true);
+		assert.equal(existsSync(join(globalAgentHome, "chains", "sdd-full.chain.md")), true);
+		assert.equal(ctx.ui.selections.length, 3);
+		assert.equal(ctx.ui.selections[0].label, "SDD execution mode");
+		assert.equal(ctx.ui.selections[1].label, "SDD artifact store");
+		assert.deepEqual(ctx.ui.selections[1].options, ["openspec"]);
+		assert.equal(ctx.ui.selections[2].label, "SDD PR chaining");
+		assert.match(ctx.ui.notifications.at(-1).message, /Preference source: user prompt/);
+		assert.deepEqual(
 			await inputHook({ text: "please use sdd for this change", source: "interactive" }, ctx),
 			{ action: "continue" },
 		);
+		assert.equal(ctx.ui.selections.length, 3, "natural SDD trigger should reuse session choices");
 		assert.deepEqual(
 			await inputHook({ text: "/sdd", source: "interactive" }, ctx),
 			{ action: "continue" },
@@ -300,7 +318,7 @@ async function run() {
 			await inputHook({ text: "/sdd:plan", source: "interactive" }, ctx),
 			{ action: "continue" },
 		);
-		assert.equal(existsSync(join(lazySddCwd, ".pi", "agents", "sdd-apply.md")), false);
+		assert.equal(ctx.ui.selections.length, 3);
 
 		assert.deepEqual(
 			await inputHook({ text: "/sdd-plan this change", source: "interactive" }, ctx),
@@ -336,6 +354,22 @@ async function run() {
 	} finally {
 		await rm(lazySddCwd, { recursive: true, force: true });
 		await rm(globalModelsPath, { force: true });
+	}
+
+	for (const [index, text] of ["/sdd", "/sdd plan", "/sdd:plan", "/sdd-plan this change"].entries()) {
+		const slashSddCwd = await tempWorkspace();
+		try {
+			const ctx = createCtx(slashSddCwd, true, `slash-sdd-session-${index}`);
+			const inputHook = hooks.get("input")[0];
+			assert.deepEqual(await inputHook({ text, source: "interactive" }, ctx), {
+				action: "continue",
+			});
+			assert.equal(existsSync(join(slashSddCwd, ".pi", "agents", "sdd-apply.md")), false);
+			assert.equal(existsSync(join(globalAgentHome, "agents", "sdd-apply.md")), true);
+			assert.equal(ctx.ui.selections.length, 3, `${text} should run canonical preflight`);
+		} finally {
+			await rm(slashSddCwd, { recursive: true, force: true });
+		}
 	}
 
 	const commandSddCwd = await tempWorkspace();
@@ -394,6 +428,26 @@ async function run() {
 		);
 	} finally {
 		await rm(sddAgentGuardCwd, { recursive: true, force: true });
+	}
+
+	const noUiSddAgentCwd = await tempWorkspace();
+	try {
+		const ctx = createCtx(noUiSddAgentCwd, false, "no-ui-sdd-agent-session");
+		const promptHook = hooks.get("before_agent_start")[0];
+		const promptResult = await promptHook(
+			{
+				agentName: "sdd-proposal",
+				systemPrompt: "You are the SDD proposal executor for Gentle AI.",
+			},
+			ctx,
+		);
+		assert.match(promptResult.systemPrompt, /SDD Session Preflight/);
+		assert.match(promptResult.systemPrompt, /No interactive UI was available/);
+		assert.equal(ctx.ui.selections.length, 0);
+		assert.equal(existsSync(join(noUiSddAgentCwd, ".pi", "agents", "sdd-apply.md")), false);
+		assert.equal(existsSync(join(globalAgentHome, "agents", "sdd-apply.md")), true);
+	} finally {
+		await rm(noUiSddAgentCwd, { recursive: true, force: true });
 	}
 
 	const invalidPreflightCwd = await tempWorkspace();

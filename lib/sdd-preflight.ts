@@ -25,6 +25,7 @@ export interface SddPreflightPreferences {
 	chainedPrStrategy: SddChainedPrStrategy;
 	reviewBudgetLines: number;
 	engramAvailable: boolean;
+	prompted: boolean;
 }
 
 interface SddPreflightCallbacks {
@@ -55,6 +56,7 @@ const DEFAULT_SDD_PREFLIGHT: SddPreflightPreferences = {
 	chainedPrStrategy: "auto-forecast",
 	reviewBudgetLines: 400,
 	engramAvailable: false,
+	prompted: false,
 };
 
 const sddPreflightBySession = new Map<string, SddPreflightPreferences>();
@@ -122,7 +124,23 @@ export function installSddAssets(
 }
 
 export function isSddPreflightTrigger(text: string): boolean {
-	return /^\/sdd-[^\s]*(?:\s|$)/i.test(text.trim());
+	const trimmed = text.trim();
+	if (/^\/sdd(?:[-:][^\s]*)?(?:\s|$)/i.test(trimmed)) return true;
+	if (/[?？]\s*$/.test(trimmed)) return false;
+	if (
+		/\b(?:don't|do\s+not|not\s+use|never\s+use|without\s+using|sin\s+usar|no\s+(?:quiero|queremos|vamos\s+a)?\s*usar)\s+sdd\b/i.test(
+			trimmed,
+		)
+	) {
+		return false;
+	}
+	return [
+		/^(?:please\s+)?(?:use|run|start)\s+(?:the\s+|an?\s+)?sdd(?:\s+(?:flow|process|workflow|plan))?\b/i,
+		/^(?:please\s+)?(?:do|handle|implement)\b.+\b(?:with|using)\s+(?:the\s+|an?\s+)?sdd\b/i,
+		/^(?:por\s+favor[\s,]+)?(?:vamos|vayamos)\s+con\s+(?:el\s+)?sdd\b/i,
+		/^(?:por\s+favor[\s,]+)?(?:usa|usá|usemos|corre|corré|arranca|arrancá|inicia|iniciá|empeza|empezá)\s+(?:el\s+)?sdd\b/i,
+		/^(?:por\s+favor[\s,]+)?(?:hacelo|hazlo|hacerlo)\s+(?:con|usando)\s+(?:el\s+)?sdd\b/i,
+	].some((pattern) => pattern.test(trimmed));
 }
 
 export function sddPreflightSessionKey(ctx: ExtensionContext): string {
@@ -209,13 +227,17 @@ async function collectSddPreflightPreferences(
 				: DEFAULT_SDD_PREFLIGHT.chainedPrStrategy,
 		reviewBudgetLines,
 		engramAvailable,
+		prompted: true,
 	};
 }
 
 export function renderSddPreflightPrompt(prefs: SddPreflightPreferences): string {
+	const sourceLine = prefs.prompted
+		? "The user already chose these SDD preferences for this Pi session. Reuse them unless the user explicitly changes them."
+		: "No interactive UI was available for SDD preflight, so these default preferences were applied for this Pi session. Ask the user before making delivery decisions that depend on them.";
 	return [
 		"## SDD Session Preflight",
-		"The user already chose these SDD preferences for this Pi session. Reuse them unless the user explicitly changes them.",
+		sourceLine,
 		`- Execution mode: ${prefs.executionMode}`,
 		`- Artifact store: ${prefs.artifactStore}${prefs.engramAvailable ? "" : " (Engram unavailable in this session)"}`,
 		`- Chained PR strategy: ${prefs.chainedPrStrategy}`,
@@ -254,6 +276,7 @@ export async function ensureSddPreflight(
 					`Artifacts: ${prefs.artifactStore}`,
 					`PR chaining: ${prefs.chainedPrStrategy}`,
 					`Review budget: ${prefs.reviewBudgetLines} changed lines`,
+					`Preference source: ${prefs.prompted ? "user prompt" : "defaults (no interactive UI available)"}`,
 					`Global SDD assets ready: ${result.agents} agent(s), ${result.chains} chain(s), ${result.support} support file(s), ${result.skipped} already present.`,
 					modelRoutingLine,
 				].join("\n"),

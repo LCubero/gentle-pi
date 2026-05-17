@@ -181,6 +181,13 @@ proposal → design ┘
 
 Do not ask SDD setup questions on session start. The first time the user initiates an SDD process in a Pi session, run the SDD preflight once and keep those choices for the rest of that session. Runtime trigger detection is intentionally deterministic: slash SDD flows and `/sdd-init` run preflight automatically; for natural-language requests, the parent/orchestrator decides semantically whether SDD is needed and must run/reuse `/gentle-ai:sdd-preflight` before continuing.
 
+**Hard gate:** `openspec/config.yaml`, existing SDD changes, installed `.pi`/global SDD assets, or a todo named "preflight" are not session preflight. They are project context only. Do not mark SDD preflight complete, start `sdd-init`, launch SDD subagents/chains, or move to explore/proposal/spec/design/tasks until this session has either:
+
+1. an injected `## SDD Session Preflight` block, or
+2. an explicit user answer in the current conversation covering all four preflight choices below.
+
+If neither exists and `/gentle-ai:sdd-preflight` cannot be invoked from the current context, ask the four choices manually with `ask_user_question` before any SDD phase work. Treat missing Engram availability as a reason to ask/confirm artifact store, not as permission to assume defaults.
+
 The preflight captures:
 
 - execution mode: `interactive` or `auto`;
@@ -207,7 +214,7 @@ In this Pi package, the default local artifact is:
 openspec/config.yaml
 ```
 
-If it is missing, ask the user for the minimal information needed or run `/sdd-init` if available. Do not proceed with a substantial SDD flow while pretending project context and testing capability are known.
+If it is missing, ask the user for the minimal information needed or run `/sdd-init` if available. This init guard runs after the session preflight gate above; project config presence or absence never substitutes for session preflight choices. Do not proceed with a substantial SDD flow while pretending project context, testing capability, or session preflight choices are known.
 
 ## Artifact Store Policy
 
