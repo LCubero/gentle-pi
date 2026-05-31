@@ -1439,15 +1439,29 @@ async function handleModelsCommand(ctx: ExtensionContext): Promise<void> {
 			}
 			const approved = await ctx.ui.confirm("Restore saved model routing?", `Replace ${modelConfigPath(ctx.cwd)} with ${modelExportPath(ctx.cwd)}`);
 			if (approved) {
-				await writeModelConfigAsync(ctx.cwd, restored);
-				const applyResult = await applyModelConfigAsync(ctx.cwd, restored);
+				try {
+					await writeModelConfigAsync(ctx.cwd, restored);
+				} catch (error) {
+					ctx.ui.notify(`Model routing restore failed before writing config: ${error instanceof Error ? error.message : String(error)}`, "warning");
+					result = await showSddModelPanel(ctx, config);
+					continue;
+				}
 				config = restored;
-				ctx.ui.notify([
-					"el Gentleman restored global model config.",
-					`Import: ${modelExportPath(ctx.cwd)}`,
-					`Global config: ${modelConfigPath(ctx.cwd)}`,
-					`Agents updated: ${applyResult.updated}`,
-				].join("\n"), "info");
+				try {
+					const applyResult = await applyModelConfigAsync(ctx.cwd, restored);
+					ctx.ui.notify([
+						"el Gentleman restored global model config.",
+						`Import: ${modelExportPath(ctx.cwd)}`,
+						`Global config: ${modelConfigPath(ctx.cwd)}`,
+						`Agents updated: ${applyResult.updated}`,
+					].join("\n"), "info");
+				} catch (error) {
+					ctx.ui.notify([
+						"el Gentleman restored global model config, but applying it to agents failed.",
+						`Global config: ${modelConfigPath(ctx.cwd)}`,
+						`Apply error: ${error instanceof Error ? error.message : String(error)}`,
+					].join("\n"), "warning");
+				}
 			}
 			result = await showSddModelPanel(ctx, config);
 			continue;
