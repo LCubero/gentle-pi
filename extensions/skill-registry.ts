@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, watch } from "node:fs";
+import { existsSync, type FSWatcher, watch } from "node:fs";
 import {
 	access,
 	mkdir,
@@ -29,6 +29,7 @@ const LEGACY_PROJECT_REGISTRY_DISABLED_REL_PATH =
 	".pi/extensions/skill-registry.ts.disabled";
 const SKILL_REGISTRY_EXTENSION_SOURCE_KEY =
 	"__gentlePiSkillRegistryExtensionSource";
+const activeWatchers = new Set<FSWatcher>();
 
 interface SkillRegistryExtensionGlobal {
 	[SKILL_REGISTRY_EXTENSION_SOURCE_KEY]?: string;
@@ -460,6 +461,18 @@ function shouldSkipDuplicateExtensionLoad(
 	return existingSource !== currentSource;
 }
 
+function closeSkillRegistryWatchers(): void {
+	for (const watcher of activeWatchers) {
+		try {
+			watcher.close();
+		} catch {
+			// Best-effort shutdown; stale handles must not block process exit.
+		}
+	}
+	activeWatchers.clear();
+	watchedCwds.clear();
+}
+
 async function startSkillRegistryWatcher(
 	cwd: string,
 	notify: (message: string) => void,
@@ -488,7 +501,8 @@ async function startSkillRegistryWatcher(
 	};
 	for (const dir of dirs) {
 		try {
-			watch(dir, { recursive: true }, refresh);
+			const watcher = watch(dir, { recursive: true }, refresh);
+			activeWatchers.add(watcher);
 		} catch {
 			// Some filesystems do not support recursive watches; session_start/manual refresh still work.
 		}
@@ -506,10 +520,19 @@ export const __testing = {
 	renderRegistry,
 	shouldSkipSkillRegistryStartup,
 	shouldSkipDuplicateExtensionLoad,
+	startSkillRegistryWatcher,
+	closeSkillRegistryWatchers,
+	activeWatcherCount() {
+		return activeWatchers.size;
+	},
 };
 
 export default function (pi: ExtensionAPI) {
 	if (shouldSkipDuplicateExtensionLoad()) return;
+
+	pi.on("session_shutdown", () => {
+		closeSkillRegistryWatchers();
+	});
 
 	pi.registerFlag(NO_SKILL_REGISTRY_FLAG, {
 		description: "Skip the Gentle AI skill registry refresh and watcher on startup.",
@@ -535,9 +558,11 @@ export default function (pi: ExtensionAPI) {
 					"warning",
 				);
 			}
-			await startSkillRegistryWatcher(ctx.cwd, (message) => {
-				if (ctx.hasUI) ctx.ui.notify(message, "info");
-			});
+			if (ctx.hasUI) {
+				await startSkillRegistryWatcher(ctx.cwd, (message) => {
+					ctx.ui.notify(message, "info");
+				});
+			}
 			if (quarantinedLegacy) {
 				setTimeout(() => {
 					void (async () => {

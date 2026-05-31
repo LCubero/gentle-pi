@@ -152,6 +152,7 @@ async function run() {
 	}
 	assert.ok(flags.has("no-skill-registry"), "missing no-skill-registry flag");
 	assert.ok(hooks.has("session_start"), "missing session_start hook");
+	assert.ok(hooks.has("session_shutdown"), "missing session_shutdown hook");
 	assert.ok(hooks.has("input"), "missing input hook");
 	assert.ok(hooks.has("before_agent_start"), "missing before_agent_start hook");
 	assert.ok(hooks.has("tool_call"), "missing tool_call hook");

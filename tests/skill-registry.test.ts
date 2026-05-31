@@ -114,6 +114,26 @@ test("uniqueExistingDirs normalizes duplicates and ignores missing roots", async
 	);
 });
 
+test("skill registry watchers close on shutdown", async () => {
+	const root = join(tmpdir(), `gentle-pi-watchers-${Date.now()}`);
+	const skillPath = join(root, "skills", "docs", "SKILL.md");
+	mkdirSync(dirname(skillPath), { recursive: true });
+	writeFileSync(skillPath, "---\nname: docs\ndescription: Docs.\n---\n");
+
+	await __testing.startSkillRegistryWatcher(root, () => undefined);
+	const attempted = __testing.activeWatcherCount();
+	__testing.closeSkillRegistryWatchers();
+	assert.equal(__testing.activeWatcherCount(), 0);
+
+	await __testing.startSkillRegistryWatcher(root, () => undefined);
+	assert.equal(
+		__testing.activeWatcherCount(),
+		attempted,
+		"shutdown must clear watched cwd state so a later session can re-watch",
+	);
+	__testing.closeSkillRegistryWatchers();
+});
+
 test("startup skip honors no skill registry controls", () => {
 	const enabled = { getFlag: () => true };
 	const disabled = { getFlag: () => false };
