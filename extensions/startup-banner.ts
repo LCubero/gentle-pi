@@ -4,10 +4,12 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 import * as os from "node:os";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
 const execAsync = promisify(exec);
+const PI_AGENT_DIR = join(os.homedir(), ".pi", "agent");
+const PI_NPM_DIR = join(PI_AGENT_DIR, "npm", "node_modules");
 
 const TEXT_LOGO = [
   "                  ▄▄▄▀▀▀▀▀██                                ▄▄▀▄▄           ▄▄█▀▀▀██   ▀▀█▄    ▄▄▄",
@@ -433,6 +435,42 @@ function currentIntroMode(): IntroMode {
   return pickIntroMode(rows, cols);
 }
 
+async function countSddAgents(): Promise<number> {
+  try {
+    const entries = await readdir(join(PI_AGENT_DIR, "agents"), { withFileTypes: true });
+    return entries.filter((entry) => entry.isFile() && /^sdd-.*\.md$/.test(entry.name)).length;
+  } catch {
+    return 0;
+  }
+}
+
+function packageNameFromSpec(spec: unknown): string | undefined {
+  if (typeof spec !== "string") return undefined;
+  const clean = spec.replace(/^npm:/, "");
+  if (clean.startsWith("@")) {
+    const parts = clean.split("@");
+    return parts.length > 2 ? `@${parts[1]}` : clean;
+  }
+  return clean.split("@")[0] || undefined;
+}
+
+async function countPackageExtensions(packages: unknown[]): Promise<number> {
+  let count = 0;
+  for (const spec of packages) {
+    const name = packageNameFromSpec(spec);
+    if (!name) continue;
+    try {
+      const raw = await readFile(join(PI_NPM_DIR, name, "package.json"), "utf8");
+      const pkg = JSON.parse(raw);
+      const extensions = pkg?.pi?.extensions;
+      if (Array.isArray(extensions)) count += extensions.length;
+    } catch {
+      // Packages installed from non-npm sources may not live in PI_NPM_DIR.
+    }
+  }
+  return count;
+}
+
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     if (!ctx.hasUI) return;
@@ -458,6 +496,7 @@ export default function (pi: ExtensionAPI) {
     let mcpServersCount = 0;
     let extensionsCount = 0;
     let packagesCount = 0;
+    let sddAgentsCount = 0;
 
     const allCommands = pi.getCommands();
     const skills = allCommands.filter((c) => c.source === "skill");
@@ -493,15 +532,15 @@ export default function (pi: ExtensionAPI) {
     setTimeout(() => {
       (async () => {
         try {
+          sddAgentsCount = await countSddAgents();
           const raw = await readFile(
-            join(os.homedir(), ".pi", "agent", "settings.json"),
+            join(PI_AGENT_DIR, "settings.json"),
             "utf8",
           );
           const cfg = JSON.parse(raw);
-          extensionsCount = Array.isArray(cfg.extensions)
-            ? cfg.extensions.length
-            : 0;
-          packagesCount = Array.isArray(cfg.packages) ? cfg.packages.length : 0;
+          const packages = Array.isArray(cfg.packages) ? cfg.packages : [];
+          packagesCount = packages.length;
+          extensionsCount = await countPackageExtensions(packages);
         } catch {
           extensionsCount = 0;
           packagesCount = 0;
@@ -720,8 +759,9 @@ export default function (pi: ExtensionAPI) {
                 ["GIT:", gitBranch],
                 ["PATH:", ctx.cwd],
                 ["MCP:", `${mcpServersCount} server(s)`],
+                ["AGENTS:", `${sddAgentsCount} phases`],
                 ["PLUGINS:", `${packagesCount} package(s)`],
-                ["AGENTS:", `${skills.length} loaded`],
+                ["SKILLS:", `${skills.length} loaded`],
                 ["EXTENSIONS:", `${extensionsCount} active`],
                 ["VER:", `v${VERSION}`],
                 ["TOOLS:", `${customTools.length} custom`],
@@ -752,22 +792,24 @@ export default function (pi: ExtensionAPI) {
                 );
                 addWideRow(
                   "AGENTS:",
-                  `${skills.length} loaded`,
+                  `${sddAgentsCount} phases`,
                   "EXTENSIONS:",
                   `${extensionsCount} active`,
                 );
                 addWideRow(
-                  "VER:",
-                  `v${VERSION}`,
+                  "SKILLS:",
+                  `${skills.length} loaded`,
                   "TOOLS:",
                   `${customTools.length} custom`,
                 );
+                addWideRow("VER:", `v${VERSION}`, "", "");
               } else {
                 addNarrowRow("GIT:", gitBranch);
                 addNarrowRow("PATH:", ctx.cwd);
                 addNarrowRow("MCP:", `${mcpServersCount} server(s)`);
                 addNarrowRow("PLUGINS:", `${packagesCount} package(s)`);
-                addNarrowRow("AGENTS:", `${skills.length} loaded`);
+                addNarrowRow("AGENTS:", `${sddAgentsCount} phases`);
+                addNarrowRow("SKILLS:", `${skills.length} loaded`);
                 addNarrowRow("EXTENSIONS:", `${extensionsCount} active`);
                 addNarrowRow("VER:", `v${VERSION}`);
                 addNarrowRow("TOOLS:", `${customTools.length} custom`);
