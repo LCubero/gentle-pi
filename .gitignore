@@ -22,3 +22,11 @@ auth.json
 .atl/
 .npm/
 coverage/
+
+# Local subagent scratch/output artifacts
+context.md
+plan.md
+research.md
+progress.md
+meta-prompt.md
+tmp/

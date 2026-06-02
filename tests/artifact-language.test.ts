@@ -49,7 +49,14 @@ test("orchestrator keeps conversation language separate from generated artifact 
 	);
 	assert.match(
 		orchestrator,
-		/Generated artifacts[\s\S]*default to English, regardless of the user's conversation language/,
+		/Generated technical artifacts[\s\S]*default to English, regardless of the user's conversation language or active persona/,
+	);
+	for (const artifactScope of ["code comments", "tests", "fixtures", "delegated phase outputs"]) {
+		assert.match(orchestrator, new RegExp(artifactScope));
+	}
+	assert.match(
+		orchestrator,
+		/Public\/contextual comments and replies[\s\S]*target context language by default/,
 	);
 });
 
@@ -88,4 +95,36 @@ test("persistent harness prompt assets do not hardcode Spanish SDD artifact copy
 	}
 
 	assert.deepEqual(failures, []);
+});
+
+test("comment-writer is context-reactive and neutral by default for Spanish comments", async () => {
+	const skill = await readFile(join(ROOT, "skills/comment-writer/SKILL.md"), "utf8");
+
+	for (const required of [
+		"target context language",
+		"explicitly requests a language",
+		"neutral/professional Spanish by default",
+	]) {
+		assert.match(skill, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+	}
+
+	for (const regionalDefault of [
+		/\bAcá\b/,
+		/\bagregá\b/,
+		/\bpodés\b/,
+		/\btenés\b/,
+		/\bfijate\b/,
+		/\bdale\b/,
+		/\bquerés\b/i,
+	]) {
+		assert.doesNotMatch(skill, regionalDefault);
+	}
+
+	for (const englishExample of [
+		"Good approach overall",
+		"Approved. The scope is clear",
+		"This PR exceeds the 400-line budget",
+	]) {
+		assert.match(skill, new RegExp(englishExample.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+	}
 });

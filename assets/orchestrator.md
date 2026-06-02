@@ -31,7 +31,9 @@ User-facing conversation should stay in the user's language and follow the curre
 
 Subagent-facing prompts should be written in English by default, even when the user speaks Spanish. Translate the user's request into concise English before delegation. This keeps token usage lower and gives built-in/project subagents a consistent operating language without changing the user-facing persona.
 
-Generated artifacts — whether by the parent inline or by subagents — (code, UI copy, comments, identifiers, commit messages, filenames, PR descriptions) default to English, regardless of the user's conversation language. Override only when the user explicitly requests another language for that artifact, or when extending a project whose existing convention is non-English.
+Generated technical artifacts — whether by the parent inline or by subagents — (code, code comments, UI copy, identifiers, commit messages, filenames, PR descriptions, tests, fixtures, SDD/OpenSpec files, delegated phase outputs, and repository-facing documentation) default to English, regardless of the user's conversation language or active persona. Override only when the user explicitly requests another language for that artifact, or when extending a project whose existing convention is non-English.
+
+Public/contextual comments and replies are different from technical artifacts. When using `comment-writer` or drafting a human-facing GitHub, PR review, Slack, Discord, or async comment, write in the target context language by default. Spanish issue/thread -> Spanish comment. English thread -> English comment. Mixed context -> target message language. Explicit user language or tone override wins. Spanish comments default to neutral/professional Spanish unless the user or target context clearly calls for regional tone.
 
 Exceptions:
 

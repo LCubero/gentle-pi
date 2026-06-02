@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 const root = join(fileURLToPath(new URL("..", import.meta.url)));
 
 const requiredPaths = [
+  "assets/orchestrator.md",
   "assets/agents/sdd-apply.md",
   "assets/agents/sdd-archive.md",
   "assets/agents/sdd-design.md",
@@ -30,7 +31,15 @@ const requiredPaths = [
   "prompts/gis.md",
   "prompts/gpr.md",
   "prompts/gwr.md",
+  "skills/branch-pr/SKILL.md",
+  "skills/chained-pr/SKILL.md",
+  "skills/cognitive-doc-design/SKILL.md",
+  "skills/comment-writer/SKILL.md",
   "skills/gentle-ai/SKILL.md",
+  "skills/issue-creation/SKILL.md",
+  "skills/judgment-day/SKILL.md",
+  "skills/release/SKILL.md",
+  "skills/skill-registry/SKILL.md",
   "skills/work-unit-commits/SKILL.md",
 ];
 
