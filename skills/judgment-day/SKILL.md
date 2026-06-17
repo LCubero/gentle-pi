@@ -1,6 +1,6 @@
 ---
 name: judgment-day
-description: "Trigger: judgment day, dual review, adversarial review, juzgar. Run blind dual review, fix confirmed issues, then re-judge."
+description: "Trigger: judgment day, judgement day, dual review, adversarial review, juzgar. Run blind dual review, fix confirmed issues, then re-judge."
 license: Apache-2.0
 metadata:
   author: gentleman-programming
@@ -9,7 +9,7 @@ metadata:
 
 ## Activation Contract
 
-Load this skill only when the user explicitly asks for Judgment Day, dual/adversarial review, or equivalent Spanish trigger (`juzgar`, `que lo juzguen`). Review a specific target: files, feature, PR, or architecture slice.
+Load this skill only when the user explicitly asks for Judgment Day, Judgement Day, dual/adversarial review, or equivalent Spanish trigger (`juzgar`, `que lo juzguen`). Review a specific target: files, feature, PR, or architecture slice.
 
 ## Hard Rules
 

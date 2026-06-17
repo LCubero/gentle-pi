@@ -55,6 +55,7 @@ Most coding-agent sessions fail for operational reasons, not model reasons:
 | **Reviewer protection**        | Surfaces review workload risk before a task turns into an oversized PR.                                                                       |
 | **Per-agent model assignment** | Pi-native modal for assigning stronger or cheaper models to specific SDD/custom agents.                                                       |
 | **Skill discovery registry**   | Maintains `.atl/skill-registry.md` from project and user skills so review/comment/PR workflows do not silently miss the right skill.          |
+| **Skill creation workflow**    | Provides the `skill-creator`/`skill-improver` skills, `/skill-creation` prompt, and packaged style guide for LLM-first skills.                 |
 | **Delivery skills**            | Includes issue-first PRs, chained PRs, work-unit commits, cognitive docs, comment writing, and Judgment Day review.                           |
 | **Runtime safety**             | Blocks destructive shell commands, asks for confirmation for sensitive operations, and blocks direct read/write/edit access to sensitive paths. |
 
@@ -299,6 +300,10 @@ Behavior:
 
 Skill discovery is a guardrail, not a workflow router: it helps Pi load the right skill without forcing extra ceremony.
 
+`gentle-pi` also ships package-owned `skill-creator` and `skill-improver` skills plus the `/skill-creation` prompt for creating or updating project skills. Both skills use `docs/skill-style-guide.md` as their normative style contract. The workflow checks for duplicates, keeps `SKILL.md` concise, uses one-line trigger-rich frontmatter, and reminds maintainers to refresh the registry after skill changes.
+
+Packaged skills include `cognitive-doc-design`, `comment-writer`, `judgment-day`, `skill-creator`, `skill-improver`, and the other delivery/review skills under `skills/`. SDD init is installed as the packaged `sdd-init` runtime agent under `assets/agents/` and refreshed with the SDD assets.
+
 Delegation contract:
 
 - parent/orchestrator resolves project/user skills from the registry and passes matching paths under `## Skills to load before work`;
@@ -395,6 +400,7 @@ Legacy string entries are still accepted and treated as `model`-only config.
 | `/gentle-ai:install-sdd`         | Repairs missing global SDD runtime assets without overwriting files. |
 | `/gentle-ai:install-sdd --force` | Force-refreshes installed global SDD assets.                         |
 | `/skill-registry:refresh`        | Regenerates `.atl/skill-registry.md`.                               |
+| `/skill-creation`                | Creates or updates an LLM-first skill using the packaged `skill-creator` contract and style guide. |
 
 Package-owned global SDD runtime assets are also refreshed automatically on session start when `gentle-pi` changes. Project-local `.pi/agents` and `.pi/chains` remain manual overrides and are never overwritten by startup refresh.
 
@@ -431,6 +437,8 @@ Compatibility aliases:
 - `cognitive-doc-design` — documentation that reduces cognitive load.
 - `comment-writer` — concise, warm, postable collaboration comments.
 - `issue-creation` — issue workflow with checks before creation.
+- `skill-creator` — create LLM-first skills with valid frontmatter.
+- `skill-improver` — audit and upgrade existing LLM-first skills.
 
 ## Memory
 
@@ -464,7 +472,8 @@ Memory contract for SDD delegation:
 | `assets/chains/`               | SDD chains installed as global Pi runtime assets.                                                          |
 | `assets/support/`              | Strict TDD support docs for apply/verify phases.                                                           |
 | `skills/`                      | Gentle AI delivery and collaboration skills.                                                               |
-| `prompts/`                     | Gentle-prefixed prompt templates.                                                                          |
+| `prompts/`                     | Gentle-prefixed prompt templates, including `/skill-creation`.                                             |
+| `docs/skill-style-guide.md`    | Normative style guide used by the packaged skill creation/improvement skills.                              |
 
 ## Development
 
