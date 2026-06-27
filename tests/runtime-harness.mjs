@@ -197,6 +197,10 @@ async function run() {
 		const promptResult = await promptHook({ systemPrompt: "base" }, createCtx(promptCwd));
 		assert.match(promptResult.systemPrompt, /base/);
 		assert.match(promptResult.systemPrompt, /el Gentleman/);
+		assert.match(promptResult.systemPrompt, /do not pass the `model` parameter by default/);
+		assert.match(promptResult.systemPrompt, /SDD model assignment tables apply only to SDD\/Judgment-Day phase agents/);
+		assert.doesNotMatch(promptResult.systemPrompt, /Every Agent tool call MUST include `model`/);
+		assert.doesNotMatch(promptResult.systemPrompt, /default\s*\|\s*sonnet\s*\|\s*Non-SDD general delegation/);
 		assert.match(promptResult.systemPrompt, /openspec\/config\.yaml.*not session preflight/s);
 		assert.match(promptResult.systemPrompt, /Do not mark SDD preflight complete/);
 		await writeFile(
@@ -765,21 +769,102 @@ async function run() {
 		assert.equal(await readFile(globalModelsPath, "utf8"), "{ invalid json");
 		assert.equal(legacyCtx.ui.notifications.at(-1).level, "warning");
 		assert.match(legacyCtx.ui.notifications.at(-1).message, /cannot open model config/);
+		await writeFile(
+			join(legacyModelsCwd, ".pi", "settings.json"),
+			JSON.stringify(
+				{
+					subagents: {
+						agentOverrides: {
+							"sdd-apply": { model: "settings/provider-model", thinking: "high" },
+						},
+					},
+				},
+				null,
+				2,
+			),
+		);
 		await writeFile(globalModelsPath, JSON.stringify({}, null, 2));
 		await hooks.get("session_start")[0]({ reason: "startup" }, legacyCtx);
-		const emptyGlobalSuppressesLegacyAgent = await readFile(
+		const emptyGlobalPreservesAgent = await readFile(
 			join(legacyModelsCwd, ".pi", "agents", "sdd-apply.md"),
 			"utf8",
 		);
-		assert.doesNotMatch(emptyGlobalSuppressesLegacyAgent, /model:/);
+		assert.match(emptyGlobalPreservesAgent, /model: global\/provider-model/);
+		const emptyGlobalPreservesSettings = JSON.parse(
+			await readFile(join(legacyModelsCwd, ".pi", "settings.json"), "utf8"),
+		);
+		assert.equal(
+			emptyGlobalPreservesSettings.subagents.agentOverrides["sdd-apply"].model,
+			"settings/provider-model",
+		);
+		await writeFile(
+			globalModelsPath,
+			JSON.stringify({ "sdd-apply": { model: "bad\nmodel: injected" } }, null, 2),
+		);
+		await hooks.get("session_start")[0]({ reason: "startup" }, legacyCtx);
+		const invalidEntryPreservesAgent = await readFile(
+			join(legacyModelsCwd, ".pi", "agents", "sdd-apply.md"),
+			"utf8",
+		);
+		assert.match(invalidEntryPreservesAgent, /model: global\/provider-model/);
+		const invalidEntryPreservesSettings = JSON.parse(
+			await readFile(join(legacyModelsCwd, ".pi", "settings.json"), "utf8"),
+		);
+		assert.equal(
+			invalidEntryPreservesSettings.subagents.agentOverrides["sdd-apply"].model,
+			"settings/provider-model",
+		);
+		await writeFile(globalModelsPath, JSON.stringify({ "sdd-apply": {} }, null, 2));
+		await hooks.get("session_start")[0]({ reason: "startup" }, legacyCtx);
+		const explicitInheritClearsAgent = await readFile(
+			join(legacyModelsCwd, ".pi", "agents", "sdd-apply.md"),
+			"utf8",
+		);
+		assert.doesNotMatch(explicitInheritClearsAgent, /model:/);
+		const explicitInheritClearsSettings = JSON.parse(
+			await readFile(join(legacyModelsCwd, ".pi", "settings.json"), "utf8"),
+		);
+		assert.equal(explicitInheritClearsSettings.subagents, undefined);
 	} finally {
 		await rm(legacyModelsCwd, { recursive: true, force: true });
+		await rm(globalModelsPath, { force: true });
+	}
+
+	const staleSettingsOnlyCwd = await tempWorkspace();
+	try {
+		await mkdir(join(staleSettingsOnlyCwd, ".pi"), { recursive: true });
+		await writeFile(
+			join(staleSettingsOnlyCwd, ".pi", "settings.json"),
+			JSON.stringify(
+				{
+					subagents: {
+						agentOverrides: {
+							worker: { model: "stale/model", thinking: "high" },
+						},
+					},
+				},
+				null,
+				2,
+			),
+		);
+		await writeFile(globalModelsPath, JSON.stringify({ worker: {} }, null, 2));
+		await hooks.get("session_start")[0]({ reason: "startup" }, createCtx(staleSettingsOnlyCwd, true));
+		const staleOnlyClearedSettings = JSON.parse(
+			await readFile(join(staleSettingsOnlyCwd, ".pi", "settings.json"), "utf8"),
+		);
+		assert.equal(staleOnlyClearedSettings.subagents, undefined);
+	} finally {
+		await rm(staleSettingsOnlyCwd, { recursive: true, force: true });
 		await rm(globalModelsPath, { force: true });
 	}
 
 	const modelsCwd = await tempWorkspace();
 	try {
 		await mkdir(join(modelsCwd, ".pi", "agents"), { recursive: true });
+		await mkdir(
+			join(modelsCwd, ".pi", "npm", "node_modules", "pi-subagents-j0k3r", "agents"),
+			{ recursive: true },
+		);
 		await mkdir(
 			join(modelsCwd, ".pi", "npm", "node_modules", "pi-subagents", "agents"),
 			{ recursive: true },
@@ -790,11 +875,27 @@ async function run() {
 				".pi",
 				"npm",
 				"node_modules",
-				"pi-subagents",
+				"pi-subagents-j0k3r",
 				"agents",
 				"worker.md",
 			),
 			`---\nname: worker\ndescription: Builtin worker\n---\n`,
+		);
+		await writeFile(
+			join(modelsCwd, ".pi", "agents", "worker.md"),
+			`---\nname: worker\ndescription: Project worker\nmodel: existing/project-worker\nthinking: high\n---\n`,
+		);
+		await writeFile(
+			join(
+				modelsCwd,
+				".pi",
+				"npm",
+				"node_modules",
+				"pi-subagents",
+				"agents",
+				"researcher.md",
+			),
+			`---\nname: researcher\ndescription: Legacy builtin researcher\n---\n`,
 		);
 		await writeFile(
 			join(modelsCwd, ".pi", "agents", "sdd-apply.md"),
@@ -811,6 +912,52 @@ async function run() {
 			join(modelsCwd, ".pi", "agents", "escape-agent.md"),
 			`---\nname: evil\u001b]52;c;Zm9v\u0007-agent\ndescription: Escape fixture\n---\n`,
 		);
+		await writeFile(
+			join(modelsCwd, ".pi", "settings.json"),
+			JSON.stringify(
+				{
+					subagents: {
+						agentOverrides: {
+							worker: { model: "existing/model", thinking: "high" },
+						},
+					},
+				},
+				null,
+				2,
+			),
+		);
+		await writeFile(globalModelsPath, JSON.stringify({}, null, 2));
+		await hooks.get("session_start")[0]({ reason: "startup" }, createCtx(modelsCwd, true));
+		const preservedSettings = JSON.parse(
+			await readFile(join(modelsCwd, ".pi", "settings.json"), "utf8"),
+		);
+		assert.equal(
+			preservedSettings.subagents.agentOverrides.worker.model,
+			"existing/model",
+		);
+		assert.equal(
+			preservedSettings.subagents.agentOverrides.worker.thinking,
+			"high",
+		);
+		const preservedProjectWorker = await readFile(
+			join(modelsCwd, ".pi", "agents", "worker.md"),
+			"utf8",
+		);
+		assert.match(preservedProjectWorker, /model: existing\/project-worker/);
+		assert.match(preservedProjectWorker, /thinking: high/);
+		await writeFile(globalModelsPath, JSON.stringify({ worker: {} }, null, 2));
+		await hooks.get("session_start")[0]({ reason: "startup" }, createCtx(modelsCwd, true));
+		const clearedSettings = JSON.parse(
+			await readFile(join(modelsCwd, ".pi", "settings.json"), "utf8"),
+		);
+		assert.equal(clearedSettings.subagents, undefined);
+		const clearedProjectWorker = await readFile(
+			join(modelsCwd, ".pi", "agents", "worker.md"),
+			"utf8",
+		);
+		assert.doesNotMatch(clearedProjectWorker, /model:/);
+		assert.doesNotMatch(clearedProjectWorker, /thinking:/);
+
 		await writeFile(
 			globalModelsPath,
 			JSON.stringify({ "sdd-apply": "openai/gpt-5" }, null, 2),
@@ -891,6 +1038,7 @@ async function run() {
 				config: {
 					"sdd-apply": { model: "openai/gpt-5", thinking: "high" },
 					worker: { model: "openai/gpt-5-mini", thinking: "low" },
+					researcher: { model: "openai/gpt-5-mini", thinking: "low" },
 				},
 			});
 		await commands.get("gentle:models").handler("", ctx);
@@ -928,6 +1076,11 @@ async function run() {
 			"openai/gpt-5-mini",
 		);
 		assert.equal(settings.subagents.agentOverrides.worker.thinking, "low");
+		assert.equal(
+			settings.subagents.agentOverrides.researcher.model,
+			"openai/gpt-5-mini",
+		);
+		assert.equal(settings.subagents.agentOverrides.researcher.thinking, "low");
 
 		const kittyE = "\x1b[101u";
 		assert.notEqual(kittyE, "e");

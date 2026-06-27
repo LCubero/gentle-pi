@@ -68,7 +68,7 @@ pi install npm:gentle-pi
 Recommended companion packages:
 
 ```bash
-pi install npm:pi-subagents
+pi install npm:pi-subagents-j0k3r
 pi install npm:pi-intercom
 pi install npm:gentle-engram
 pi install npm:pi-web-access
@@ -346,7 +346,7 @@ The modal discovers:
 
 - project agents in `.pi/agents/` and `.agents/`;
 - user agents in `~/.pi/agent/agents/` and `~/.agents/`;
-- built-in agents from `pi-subagents`.
+- built-in agents from `pi-subagents-j0k3r` when present.
 
 Recommended model/effort shape:
 

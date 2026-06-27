@@ -734,7 +734,9 @@ function normalizeRoutingEntry(value: unknown): AgentRoutingEntry | undefined {
 	if (!isRecord(value)) return undefined;
 	const model = normalizeModelId(value.model);
 	const thinking = isThinkingLevel(value.thinking) ? value.thinking : undefined;
-	if (!model && !thinking) return undefined;
+	if (!model && !thinking) {
+		return Object.keys(value).length === 0 ? {} : undefined;
+	}
 	return { model, thinking };
 }
 
@@ -987,13 +989,38 @@ async function listAgentsFromDirAsync(
 	return entries;
 }
 
-function listDiscoverableAgents(cwd: string): AgentEntry[] {
-	const globalAgentDir = join(gentlePiAgentHome(), "agents");
-	const builtinDirs = [
+function builtinAgentDirs(cwd: string): string[] {
+	return [
+		join(PACKAGE_ROOT, "..", "pi-subagents-j0k3r", "agents"),
+		join(cwd, ".pi", "npm", "node_modules", "pi-subagents-j0k3r", "agents"),
+		join(homedir(), ".local", "lib", "node_modules", "pi-subagents-j0k3r", "agents"),
 		join(PACKAGE_ROOT, "..", "pi-subagents", "agents"),
 		join(cwd, ".pi", "npm", "node_modules", "pi-subagents", "agents"),
 		join(homedir(), ".local", "lib", "node_modules", "pi-subagents", "agents"),
 	];
+}
+
+function listBuiltinAgentNames(cwd: string): Set<string> {
+	return new Set(
+		builtinAgentDirs(cwd).flatMap((dir) =>
+			listAgentsFromDir(dir, "builtin").map((agent) => agent.name),
+		),
+	);
+}
+
+async function listBuiltinAgentNamesAsync(cwd: string): Promise<Set<string>> {
+	const names = new Set<string>();
+	for (const dir of builtinAgentDirs(cwd)) {
+		for (const agent of await listAgentsFromDirAsync(dir, "builtin")) {
+			names.add(agent.name);
+		}
+	}
+	return names;
+}
+
+function listDiscoverableAgents(cwd: string): AgentEntry[] {
+	const globalAgentDir = join(gentlePiAgentHome(), "agents");
+	const builtinDirs = builtinAgentDirs(cwd);
 	const agents = [
 		...builtinDirs.flatMap((dir) => listAgentsFromDir(dir, "builtin")),
 		...listAgentsFromDir(globalAgentDir, "user"),
@@ -1008,11 +1035,7 @@ function listDiscoverableAgents(cwd: string): AgentEntry[] {
 
 async function listDiscoverableAgentsAsync(cwd: string): Promise<AgentEntry[]> {
 	const globalAgentDir = join(gentlePiAgentHome(), "agents");
-	const builtinDirs = [
-		join(PACKAGE_ROOT, "..", "pi-subagents", "agents"),
-		join(cwd, ".pi", "npm", "node_modules", "pi-subagents", "agents"),
-		join(homedir(), ".local", "lib", "node_modules", "pi-subagents", "agents"),
-	];
+	const builtinDirs = builtinAgentDirs(cwd);
 	const agents: AgentEntry[] = [];
 	for (const dir of builtinDirs) {
 		agents.push(...(await listAgentsFromDirAsync(dir, "builtin")));
@@ -1043,6 +1066,10 @@ function orderDiscoverableAgents(agents: AgentEntry[]): AgentEntry[] {
 
 function projectSettingsPath(cwd: string): string {
 	return join(cwd, ".pi", "settings.json");
+}
+
+function isClearRoutingEntry(entry: AgentRoutingEntry): boolean {
+	return entry.model === undefined && entry.thinking === undefined;
 }
 
 function updateBuiltinModelOverride(
@@ -1131,12 +1158,27 @@ export function applyModelConfig(
 ): { updated: number; skipped: number } {
 	let updated = 0;
 	let skipped = 0;
+	const builtinNames = listBuiltinAgentNames(cwd);
+	const seenAgents = new Set<string>();
 	for (const agent of listDiscoverableAgents(cwd)) {
+		seenAgents.add(agent.name);
 		const entry = config[agent.name];
 		if (agent.source === "builtin") {
+			if (entry === undefined) {
+				skipped += 1;
+				continue;
+			}
 			if (updateBuiltinModelOverride(cwd, agent.name, entry)) updated += 1;
 			else skipped += 1;
 			continue;
+		}
+		if (entry === undefined) {
+			skipped += 1;
+			continue;
+		}
+		if (builtinNames.has(agent.name) || isClearRoutingEntry(entry)) {
+			if (updateBuiltinModelOverride(cwd, agent.name, entry)) updated += 1;
+			else skipped += 1;
 		}
 		if (!agent.filePath || !existsSync(agent.filePath)) {
 			skipped += 1;
@@ -1151,6 +1193,12 @@ export function applyModelConfig(
 		writeFileSync(agent.filePath, next);
 		updated += 1;
 	}
+	for (const [name, entry] of Object.entries(config)) {
+		if (!seenAgents.has(name) && isClearRoutingEntry(entry)) {
+			if (updateBuiltinModelOverride(cwd, name, entry)) updated += 1;
+			else skipped += 1;
+		}
+	}
 	return { updated, skipped };
 }
 
@@ -1160,13 +1208,29 @@ export async function applyModelConfigAsync(
 ): Promise<{ updated: number; skipped: number }> {
 	let updated = 0;
 	let skipped = 0;
+	const builtinNames = await listBuiltinAgentNamesAsync(cwd);
+	const seenAgents = new Set<string>();
 	for (const agent of await listDiscoverableAgentsAsync(cwd)) {
+		seenAgents.add(agent.name);
 		const entry = config[agent.name];
 		if (agent.source === "builtin") {
+			if (entry === undefined) {
+				skipped += 1;
+				continue;
+			}
 			if (await updateBuiltinModelOverrideAsync(cwd, agent.name, entry))
 				updated += 1;
 			else skipped += 1;
 			continue;
+		}
+		if (entry === undefined) {
+			skipped += 1;
+			continue;
+		}
+		if (builtinNames.has(agent.name) || isClearRoutingEntry(entry)) {
+			if (await updateBuiltinModelOverrideAsync(cwd, agent.name, entry))
+				updated += 1;
+			else skipped += 1;
 		}
 		if (!agent.filePath || !(await pathExists(agent.filePath))) {
 			skipped += 1;
@@ -1180,6 +1244,13 @@ export async function applyModelConfigAsync(
 		}
 		await writeFile(agent.filePath, next);
 		updated += 1;
+	}
+	for (const [name, entry] of Object.entries(config)) {
+		if (!seenAgents.has(name) && isClearRoutingEntry(entry)) {
+			if (await updateBuiltinModelOverrideAsync(cwd, name, entry))
+				updated += 1;
+			else skipped += 1;
+		}
 	}
 	return { updated, skipped };
 }
@@ -1500,7 +1571,7 @@ class SddModelPanel implements OverlayComponent {
 		const current = this.draft[name] ?? {};
 		if (model === undefined) delete current.model;
 		else current.model = model;
-		if (!current.model && !current.thinking) delete this.draft[name];
+		if (!current.model && !current.thinking) this.draft[name] = {};
 		else this.draft[name] = current;
 	}
 
@@ -1508,12 +1579,12 @@ class SddModelPanel implements OverlayComponent {
 		const current = this.draft[name] ?? {};
 		if (thinking === undefined) delete current.thinking;
 		else current.thinking = thinking;
-		if (!current.model && !current.thinking) delete this.draft[name];
+		if (!current.model && !current.thinking) this.draft[name] = {};
 		else this.draft[name] = current;
 	}
 
 	private clearEntry(name: string): void {
-		delete this.draft[name];
+		this.draft[name] = {};
 	}
 
 	private filteredModelOptions(): string[] {

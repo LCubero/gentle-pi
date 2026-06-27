@@ -82,7 +82,15 @@ Examples:
 - run tests/builds and summarize results;
 - fresh-context review.
 
-Use `pi-subagents` when available. Prefer background/async for long exploration, implementation, tests, or review when the parent has independent work.
+Use `pi-subagents-j0k3r` when available. Prefer background/async for long exploration, implementation, tests, or review when the parent has independent work.
+
+### Pi Subagent Model Routing
+
+For generic Pi subagents (`delegate`, `worker`, `scout`, `reviewer`, `context-builder`, `oracle`, `planner`, `researcher`, or other non-SDD agents), do not pass the `model` parameter by default. Let `pi-subagents` resolve model and thinking from `.pi/settings.json`, `.pi/subagents.json`, global subagent config, and runtime defaults.
+
+SDD model assignment tables apply only to SDD/Judgment-Day phase agents. They must not be used for generic Pi delegation.
+
+Only pass `model` for generic subagents when the user explicitly requests a model override for that launch.
 
 Default balanced pattern for bounded implementation:
 
