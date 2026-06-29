@@ -58,3 +58,15 @@ test("package manifest installs pi-pretty through a wrapper without bundling nat
 		"pi-pretty must not be bundled because its native optional dependencies are platform-specific",
 	);
 });
+
+
+test("pi-pretty wrapper uses real package path resolution for pnpm symlink installs", () => {
+	const wrapper = readFileSync(
+		join(PACKAGE_ROOT, "extensions", "pi-pretty.ts"),
+		"utf8",
+	);
+
+	assert.match(wrapper, /realpathSync/);
+	assert.match(wrapper, /createRequire/);
+	assert.match(wrapper, /@heyhuynhgiabuu\/pi-pretty/);
+});
