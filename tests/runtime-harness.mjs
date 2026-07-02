@@ -22,31 +22,37 @@ const EXPECTED_BANNER_COMMANDS = [
 	"gentle:toggle-rose",
 	"gentle:toggle-text-logo",
 	"gentle:banner-color",
-	"gentle-ai:banner",
-	"gentle-ai:toggle-rose",
-	"gentle-ai:toggle-text-logo",
-	"gentle-ai:banner-color",
 ];
 
 const EXPECTED_COMMANDS = [
-	"gentle-ai:install-sdd",
-	"gentle-ai:sdd-preflight",
+	"gentle:install-sdd",
 	"gentle:sdd-preflight",
 	"sdd-status",
-	"gentle-ai:sdd-status",
 	"sdd-continue",
-	"gentle-ai:sdd-continue",
 	"gentle:models",
+	"gentle:persona",
+	"gentle:status",
+	"gentle:doctor",
+	"sdd-init",
+	"skill-registry:refresh",
+	...EXPECTED_BANNER_COMMANDS,
+];
+
+const FORBIDDEN_COMPAT_COMMANDS = [
+	"gentle-ai:install-sdd",
+	"gentle-ai:sdd-preflight",
+	"gentle-ai:sdd-status",
+	"gentle-ai:sdd-continue",
 	"gentle-ai:models",
 	"gentleman:models",
-	"gentle:persona",
 	"gentle-ai:persona",
 	"gentleman:persona",
 	"gentle-ai:status",
 	"gentle-ai:doctor",
-	"sdd-init",
-	"skill-registry:refresh",
-	...EXPECTED_BANNER_COMMANDS,
+	"gentle-ai:banner",
+	"gentle-ai:toggle-rose",
+	"gentle-ai:toggle-text-logo",
+	"gentle-ai:banner-color",
 ];
 
 function createPi() {
@@ -161,11 +167,15 @@ async function run() {
 	process.env.GENTLE_PI_CONFIG_HOME = globalConfigHome;
 	process.env.GENTLE_PI_AGENT_HOME = globalAgentHome;
 	const globalModelsPath = join(globalConfigHome, "models.json");
+	const globalSubagentsPath = join(globalAgentHome, "subagents.json");
 	const { pi, hooks, commands, flags } = createPi();
 	await loadExtensions(pi);
 
 	for (const name of EXPECTED_COMMANDS) {
 		assert.ok(commands.has(name), `missing command ${name}`);
+	}
+	for (const name of FORBIDDEN_COMPAT_COMMANDS) {
+		assert.equal(commands.has(name), false, `compat command should not be registered: ${name}`);
 	}
 	assert.ok(flags.has("no-skill-registry"), "missing no-skill-registry flag");
 	assert.ok(hooks.has("session_start"), "missing session_start hook");
@@ -313,7 +323,7 @@ async function run() {
 		assert.equal(bannerConfig.showRose, false);
 		assert.equal(bannerConfig.showTextLogo, true);
 		assert.equal(bannerConfig.color, "pink");
-		await commands.get("gentle-ai:toggle-text-logo").handler("", ctx);
+		await commands.get("gentle:toggle-text-logo").handler("", ctx);
 		bannerConfig = JSON.parse(await readFile(join(globalConfigHome, "banner.json"), "utf8"));
 		assert.equal(bannerConfig.showTextLogo, false);
 		await commands.get("gentle:banner-color").handler("cyan", ctx);
@@ -500,7 +510,7 @@ async function run() {
 		assert.equal(ctx.ui.selections.length, 3);
 		assert.deepEqual(ctx.ui.selections[1].options, ["openspec"]);
 		assert.match(ctx.ui.notifications.at(-1).message, /SDD preflight complete/);
-		await commands.get("gentle-ai:status").handler("", ctx);
+		await commands.get("gentle:status").handler("", ctx);
 		assert.match(ctx.ui.notifications.at(-1).message, /Global SDD assets stale: 0 file\(s\)/);
 		assert.doesNotMatch(ctx.ui.notifications.at(-1).message, /install-sdd --force/);
 
@@ -543,7 +553,7 @@ async function run() {
 	const commandSddCwd = await tempWorkspace();
 	try {
 		const ctx = createCtx(commandSddCwd, true, "command-session");
-		await commands.get("gentle-ai:sdd-preflight").handler("", ctx);
+		await commands.get("gentle:sdd-preflight").handler("", ctx);
 		assert.equal(existsSync(join(commandSddCwd, ".pi", "agents", "sdd-apply.md")), false);
 		assert.equal(existsSync(join(globalAgentHome, "agents", "sdd-apply.md")), true);
 		assert.equal(ctx.ui.selections.length, 3);
@@ -622,7 +632,7 @@ async function run() {
 	try {
 		await writeFile(globalModelsPath, "{ invalid json");
 		const ctx = createCtx(invalidPreflightCwd, true, "invalid-preflight-session");
-		await commands.get("gentle-ai:sdd-preflight").handler("", ctx);
+		await commands.get("gentle:sdd-preflight").handler("", ctx);
 		assert.equal(ctx.ui.notifications.at(-1).level, "warning");
 		assert.match(ctx.ui.notifications.at(-1).message, /Model routing skipped:/);
 		assert.match(ctx.ui.notifications.at(-1).message, /invalid JSON or not an object/);
@@ -635,7 +645,7 @@ async function run() {
 	try {
 		pi.setActiveTools(["read", "bash", "edit", "write", "mem_save"]);
 		const ctx = createCtx(engramSddCwd, true, "engram-session");
-		await commands.get("gentle-ai:sdd-preflight").handler("", ctx);
+		await commands.get("gentle:sdd-preflight").handler("", ctx);
 		assert.deepEqual(ctx.ui.selections[1].options, ["openspec", "engram", "both"]);
 	} finally {
 		pi.setActiveTools(["read", "bash", "edit", "write"]);
@@ -646,7 +656,7 @@ async function run() {
 	try {
 		pi.setActiveTools(["read", "bash", "edit", "write", "engram_mem_save"]);
 		const ctx = createCtx(directEngramToolCwd, true, "direct-engram-session");
-		await commands.get("gentle-ai:sdd-preflight").handler("", ctx);
+		await commands.get("gentle:sdd-preflight").handler("", ctx);
 		assert.deepEqual(ctx.ui.selections[1].options, ["openspec"]);
 	} finally {
 		pi.setActiveTools(["read", "bash", "edit", "write"]);
@@ -656,7 +666,7 @@ async function run() {
 	const installCwd = await tempWorkspace();
 	try {
 		const ctx = createCtx(installCwd, true);
-		await commands.get("gentle-ai:install-sdd").handler("", ctx);
+		await commands.get("gentle:install-sdd").handler("", ctx);
 		assert.match(ctx.ui.notifications.at(-1).message, /Global Gentle AI SDD assets installed/);
 		assert.equal(existsSync(join(installCwd, ".pi", "agents", "sdd-apply.md")), false);
 		assert.equal(existsSync(join(globalAgentHome, "agents", "sdd-apply.md")), true);
@@ -677,17 +687,17 @@ async function run() {
 		await writeFile(join(staleAssetsCwd, ".pi", "chains", "sdd-full.chain.md"), "stale chain\n");
 		await writeFile(join(staleAssetsCwd, ".pi", "gentle-ai", "support", "sdd-status-contract.md"), "stale status contract\n");
 		const ctx = createCtx(staleAssetsCwd, true);
-		await commands.get("gentle-ai:status").handler("", ctx);
+		await commands.get("gentle:status").handler("", ctx);
 		assert.match(ctx.ui.notifications.at(-1).message, /Project-local SDD agent overrides: 2 file\(s\)/);
 		assert.match(ctx.ui.notifications.at(-1).message, /local SDD agents shadow package assets/);
-		await commands.get("gentle-ai:doctor").handler("", ctx);
+		await commands.get("gentle:doctor").handler("", ctx);
 		assert.match(ctx.ui.notifications.at(-1).message, /el Gentleman doctor/);
 		assert.match(ctx.ui.notifications.at(-1).message, /Sensitive-path guard active/);
 		pi.setActiveTools([{ name: "engram.mem_save" }]);
-		await commands.get("gentle-ai:doctor").handler("", ctx);
+		await commands.get("gentle:doctor").handler("", ctx);
 		assert.match(ctx.ui.notifications.at(-1).message, /Engram memory tools active/);
 		pi.setActiveTools([{ name: "engram_mem_save" }]);
-		await commands.get("gentle-ai:doctor").handler("", ctx);
+		await commands.get("gentle:doctor").handler("", ctx);
 		assert.match(ctx.ui.notifications.at(-1).message, /Engram memory tools not active in this session/);
 		pi.setActiveTools(["read", "bash", "edit", "write"]);
 	} finally {
@@ -709,7 +719,7 @@ async function run() {
 		assert.match(ctx.ui.notifications[0].message, /SDD preflight complete/);
 		assert.match(ctx.ui.notifications.at(-1).message, /Wrote openspec\/config\.yaml/);
 
-		await commands.get("gentle-ai:sdd-preflight").handler("", ctx);
+		await commands.get("gentle:sdd-preflight").handler("", ctx);
 		assert.equal(ctx.ui.selections.length, 3, "/sdd-init preflight should be reused by later manual preflight");
 	} finally {
 		await rm(sddCwd, { recursive: true, force: true });
@@ -789,20 +799,6 @@ async function run() {
 		assert.equal(await readFile(globalModelsPath, "utf8"), "{ invalid json");
 		assert.equal(legacyCtx.ui.notifications.at(-1).level, "warning");
 		assert.match(legacyCtx.ui.notifications.at(-1).message, /cannot open model config/);
-		await writeFile(
-			join(legacyModelsCwd, ".pi", "settings.json"),
-			JSON.stringify(
-				{
-					subagents: {
-						agentOverrides: {
-							"sdd-apply": { model: "settings/provider-model", thinking: "high" },
-						},
-					},
-				},
-				null,
-				2,
-			),
-		);
 		await writeFile(globalModelsPath, JSON.stringify({}, null, 2));
 		await hooks.get("session_start")[0]({ reason: "startup" }, legacyCtx);
 		const emptyGlobalPreservesAgent = await readFile(
@@ -810,12 +806,12 @@ async function run() {
 			"utf8",
 		);
 		assert.match(emptyGlobalPreservesAgent, /model: global\/provider-model/);
-		const emptyGlobalPreservesSettings = JSON.parse(
-			await readFile(join(legacyModelsCwd, ".pi", "settings.json"), "utf8"),
+		const emptyGlobalPreservesProfiles = JSON.parse(
+			await readFile(join(legacyModelsCwd, ".pi", "subagents.json"), "utf8"),
 		);
 		assert.equal(
-			emptyGlobalPreservesSettings.subagents.agentOverrides["sdd-apply"].model,
-			"settings/provider-model",
+			emptyGlobalPreservesProfiles.model_profiles["sdd-apply"].model,
+			"global/provider-model",
 		);
 		await writeFile(
 			globalModelsPath,
@@ -827,12 +823,12 @@ async function run() {
 			"utf8",
 		);
 		assert.match(invalidEntryPreservesAgent, /model: global\/provider-model/);
-		const invalidEntryPreservesSettings = JSON.parse(
-			await readFile(join(legacyModelsCwd, ".pi", "settings.json"), "utf8"),
+		const invalidEntryPreservesProfiles = JSON.parse(
+			await readFile(join(legacyModelsCwd, ".pi", "subagents.json"), "utf8"),
 		);
 		assert.equal(
-			invalidEntryPreservesSettings.subagents.agentOverrides["sdd-apply"].model,
-			"settings/provider-model",
+			invalidEntryPreservesProfiles.model_profiles["sdd-apply"].model,
+			"global/provider-model",
 		);
 		await writeFile(globalModelsPath, JSON.stringify({ "sdd-apply": {} }, null, 2));
 		await hooks.get("session_start")[0]({ reason: "startup" }, legacyCtx);
@@ -841,10 +837,10 @@ async function run() {
 			"utf8",
 		);
 		assert.doesNotMatch(explicitInheritClearsAgent, /model:/);
-		const explicitInheritClearsSettings = JSON.parse(
-			await readFile(join(legacyModelsCwd, ".pi", "settings.json"), "utf8"),
+		const explicitInheritClearsProfiles = JSON.parse(
+			await readFile(join(legacyModelsCwd, ".pi", "subagents.json"), "utf8"),
 		);
-		assert.equal(explicitInheritClearsSettings.subagents, undefined);
+		assert.equal(explicitInheritClearsProfiles.model_profiles, undefined);
 	} finally {
 		await rm(legacyModelsCwd, { recursive: true, force: true });
 		await rm(globalModelsPath, { force: true });
@@ -852,15 +848,12 @@ async function run() {
 
 	const staleSettingsOnlyCwd = await tempWorkspace();
 	try {
-		await mkdir(join(staleSettingsOnlyCwd, ".pi"), { recursive: true });
 		await writeFile(
-			join(staleSettingsOnlyCwd, ".pi", "settings.json"),
+			globalSubagentsPath,
 			JSON.stringify(
 				{
-					subagents: {
-						agentOverrides: {
-							worker: { model: "stale/model", thinking: "high" },
-						},
+					model_profiles: {
+						worker: { model: "stale/model", effort: "high" },
 					},
 				},
 				null,
@@ -869,18 +862,126 @@ async function run() {
 		);
 		await writeFile(globalModelsPath, JSON.stringify({ worker: {} }, null, 2));
 		await hooks.get("session_start")[0]({ reason: "startup" }, createCtx(staleSettingsOnlyCwd, true));
-		const staleOnlyClearedSettings = JSON.parse(
-			await readFile(join(staleSettingsOnlyCwd, ".pi", "settings.json"), "utf8"),
+		const staleOnlyClearedProfiles = JSON.parse(
+			await readFile(globalSubagentsPath, "utf8"),
 		);
-		assert.equal(staleOnlyClearedSettings.subagents, undefined);
+		assert.equal(staleOnlyClearedProfiles.model_profiles, undefined);
 	} finally {
 		await rm(staleSettingsOnlyCwd, { recursive: true, force: true });
 		await rm(globalModelsPath, { force: true });
+		await rm(globalSubagentsPath, { force: true });
+	}
+
+	const legacySettingsMigrationCwd = await tempWorkspace();
+	try {
+		await mkdir(join(legacySettingsMigrationCwd, ".pi", "subagents"), { recursive: true });
+		await mkdir(join(globalAgentHome, "subagents"), { recursive: true });
+		await writeFile(
+			join(legacySettingsMigrationCwd, ".pi", "subagents", "local-worker.md"),
+			`---\nname: local-worker\ndescription: Local worker\n---\n`,
+		);
+		await writeFile(
+			join(legacySettingsMigrationCwd, ".pi", "subagents", "local-new.md"),
+			`---\nname: local-new\ndescription: Local new worker\n---\n`,
+		);
+		await writeFile(
+			join(globalAgentHome, "subagents", "global-worker.md"),
+			`---\nname: global-worker\ndescription: Global worker\n---\n`,
+		);
+		await writeFile(
+			join(globalAgentHome, "subagents", "global-new.md"),
+			`---\nname: global-new\ndescription: Global new worker\n---\n`,
+		);
+		await writeFile(
+			join(legacySettingsMigrationCwd, ".pi", "subagents.json"),
+			JSON.stringify({ model_profiles: { "local-worker": { model: "existing/local", effort: "medium" } } }, null, 2),
+		);
+		await writeFile(
+			globalSubagentsPath,
+			JSON.stringify({ model_profiles: { "global-worker": { model: "existing/global", effort: "medium" } } }, null, 2),
+		);
+		await writeFile(
+			join(legacySettingsMigrationCwd, ".pi", "settings.json"),
+			JSON.stringify(
+				{
+					theme: "keep-me",
+					subagents: {
+						history: "keep-me-too",
+						agentOverrides: {
+							"local-worker": {},
+							"local-new": { model: "local/new-model", thinking: "minimal" },
+							"global-worker": {},
+							"global-new": { model: "global/new-model", thinking: "xhigh" },
+							"unknown-project": { model: "unknown/project-model", thinking: "low" },
+						},
+					},
+				},
+				null,
+				2,
+			),
+		);
+		await hooks.get("session_start")[0]({ reason: "startup" }, createCtx(legacySettingsMigrationCwd, true));
+		const migratedProjectProfiles = JSON.parse(
+			await readFile(join(legacySettingsMigrationCwd, ".pi", "subagents.json"), "utf8"),
+		);
+		assert.equal(migratedProjectProfiles.model_profiles["local-worker"].model, "existing/local");
+		assert.equal(migratedProjectProfiles.model_profiles["local-worker"].effort, "medium");
+		assert.equal(migratedProjectProfiles.model_profiles["local-new"].model, "local/new-model");
+		assert.equal(migratedProjectProfiles.model_profiles["local-new"].effort, "minimal");
+		assert.equal(migratedProjectProfiles.model_profiles["unknown-project"].model, "unknown/project-model");
+		assert.equal(migratedProjectProfiles.model_profiles["unknown-project"].effort, "low");
+		const migratedGlobalProfiles = JSON.parse(await readFile(globalSubagentsPath, "utf8"));
+		assert.equal(migratedGlobalProfiles.model_profiles["global-worker"].model, "existing/global");
+		assert.equal(migratedGlobalProfiles.model_profiles["global-worker"].effort, "medium");
+		assert.equal(migratedGlobalProfiles.model_profiles["global-new"].model, "global/new-model");
+		assert.equal(migratedGlobalProfiles.model_profiles["global-new"].effort, "xhigh");
+		const migratedSettings = JSON.parse(
+			await readFile(join(legacySettingsMigrationCwd, ".pi", "settings.json"), "utf8"),
+		);
+		assert.equal(migratedSettings.theme, "keep-me");
+		assert.equal(migratedSettings.subagents.history, "keep-me-too");
+		assert.equal(migratedSettings.subagents.agentOverrides, undefined);
+	} finally {
+		await rm(legacySettingsMigrationCwd, { recursive: true, force: true });
+		await rm(globalSubagentsPath, { force: true });
+	}
+
+	const invalidMigrationTargetCwd = await tempWorkspace();
+	try {
+		await mkdir(join(invalidMigrationTargetCwd, ".pi", "subagents"), { recursive: true });
+		await writeFile(
+			join(invalidMigrationTargetCwd, ".pi", "subagents", "local-bad.md"),
+			`---\nname: local-bad\ndescription: Local bad target\n---\n`,
+		);
+		await mkdir(join(globalAgentHome, "subagents"), { recursive: true });
+		await writeFile(
+			join(globalAgentHome, "subagents", "global-bad.md"),
+			`---\nname: global-bad\ndescription: Global bad target\n---\n`,
+		);
+		await writeFile(join(invalidMigrationTargetCwd, ".pi", "subagents.json"), "{ invalid json");
+		await writeFile(globalSubagentsPath, "{ invalid global json");
+		await writeFile(
+			join(invalidMigrationTargetCwd, ".pi", "settings.json"),
+			JSON.stringify({ subagents: { agentOverrides: { "local-bad": { model: "legacy/model", thinking: "low" }, "global-bad": { model: "legacy/global-model", thinking: "high" } } } }, null, 2),
+		);
+		await hooks.get("session_start")[0]({ reason: "startup" }, createCtx(invalidMigrationTargetCwd, true));
+		assert.equal(await readFile(join(invalidMigrationTargetCwd, ".pi", "subagents.json"), "utf8"), "{ invalid json");
+		assert.equal(await readFile(globalSubagentsPath, "utf8"), "{ invalid global json");
+		const preservedLegacySettings = JSON.parse(
+			await readFile(join(invalidMigrationTargetCwd, ".pi", "settings.json"), "utf8"),
+		);
+		assert.equal(preservedLegacySettings.subagents.agentOverrides["local-bad"].model, "legacy/model");
+		assert.equal(preservedLegacySettings.subagents.agentOverrides["global-bad"].model, "legacy/global-model");
+	} finally {
+		await rm(invalidMigrationTargetCwd, { recursive: true, force: true });
+		await rm(globalSubagentsPath, { force: true });
 	}
 
 	const modelsCwd = await tempWorkspace();
 	try {
 		await mkdir(join(modelsCwd, ".pi", "agents"), { recursive: true });
+		await mkdir(join(modelsCwd, ".pi", "subagents"), { recursive: true });
+		await mkdir(join(globalAgentHome, "subagents"), { recursive: true });
 		await mkdir(
 			join(modelsCwd, ".pi", "npm", "node_modules", "pi-subagents-j0k3r", "agents"),
 			{ recursive: true },
@@ -906,6 +1007,10 @@ async function run() {
 			`---\nname: worker\ndescription: Project worker\nmodel: existing/project-worker\nthinking: high\n---\n`,
 		);
 		await writeFile(
+			join(modelsCwd, ".pi", "subagents", "worker.md"),
+			`---\nname: worker\ndescription: Project subagents worker\nmodel: existing/project-subagent-worker\nthinking: medium\n---\n`,
+		);
+		await writeFile(
 			join(
 				modelsCwd,
 				".pi",
@@ -921,6 +1026,14 @@ async function run() {
 			join(modelsCwd, ".pi", "agents", "sdd-apply.md"),
 			`---\nname: sdd-apply\ndescription: Apply phase\n---\n\nbody\n`,
 		);
+		await writeFile(
+			join(modelsCwd, ".pi", "subagents", "project-special.md"),
+			`---\nname: project-special\ndescription: Project subagent dir fixture\n---\n\nbody\n`,
+		);
+		await writeFile(
+			join(globalAgentHome, "subagents", "global-special.md"),
+			`---\nname: global-special\ndescription: Global subagent dir fixture\n---\n\nbody\n`,
+		);
 		for (let i = 0; i < 25; i++) {
 			const name = `large-agent-${String(i).padStart(2, "0")}`;
 			await writeFile(
@@ -933,13 +1046,11 @@ async function run() {
 			`---\nname: evil\u001b]52;c;Zm9v\u0007-agent\ndescription: Escape fixture\n---\n`,
 		);
 		await writeFile(
-			join(modelsCwd, ".pi", "settings.json"),
+			join(modelsCwd, ".pi", "subagents.json"),
 			JSON.stringify(
 				{
-					subagents: {
-						agentOverrides: {
-							worker: { model: "existing/model", thinking: "high" },
-						},
+					model_profiles: {
+						worker: { model: "existing/model", effort: "high" },
 					},
 				},
 				null,
@@ -948,35 +1059,44 @@ async function run() {
 		);
 		await writeFile(globalModelsPath, JSON.stringify({}, null, 2));
 		await hooks.get("session_start")[0]({ reason: "startup" }, createCtx(modelsCwd, true));
-		const preservedSettings = JSON.parse(
-			await readFile(join(modelsCwd, ".pi", "settings.json"), "utf8"),
+		const preservedProfiles = JSON.parse(
+			await readFile(join(modelsCwd, ".pi", "subagents.json"), "utf8"),
 		);
 		assert.equal(
-			preservedSettings.subagents.agentOverrides.worker.model,
+			preservedProfiles.model_profiles.worker.model,
 			"existing/model",
 		);
-		assert.equal(
-			preservedSettings.subagents.agentOverrides.worker.thinking,
-			"high",
-		);
+		assert.equal(preservedProfiles.model_profiles.worker.effort, "high");
 		const preservedProjectWorker = await readFile(
 			join(modelsCwd, ".pi", "agents", "worker.md"),
 			"utf8",
 		);
 		assert.match(preservedProjectWorker, /model: existing\/project-worker/);
 		assert.match(preservedProjectWorker, /thinking: high/);
+		const preservedProjectSubagentWorker = await readFile(
+			join(modelsCwd, ".pi", "subagents", "worker.md"),
+			"utf8",
+		);
+		assert.match(preservedProjectSubagentWorker, /model: existing\/project-subagent-worker/);
+		assert.match(preservedProjectSubagentWorker, /thinking: medium/);
 		await writeFile(globalModelsPath, JSON.stringify({ worker: {} }, null, 2));
 		await hooks.get("session_start")[0]({ reason: "startup" }, createCtx(modelsCwd, true));
-		const clearedSettings = JSON.parse(
-			await readFile(join(modelsCwd, ".pi", "settings.json"), "utf8"),
+		const clearedProfiles = JSON.parse(
+			await readFile(join(modelsCwd, ".pi", "subagents.json"), "utf8"),
 		);
-		assert.equal(clearedSettings.subagents, undefined);
-		const clearedProjectWorker = await readFile(
+		assert.equal(clearedProfiles.model_profiles, undefined);
+		const unchangedProjectWorker = await readFile(
 			join(modelsCwd, ".pi", "agents", "worker.md"),
 			"utf8",
 		);
-		assert.doesNotMatch(clearedProjectWorker, /model:/);
-		assert.doesNotMatch(clearedProjectWorker, /thinking:/);
+		assert.match(unchangedProjectWorker, /model: existing\/project-worker/);
+		assert.match(unchangedProjectWorker, /thinking: high/);
+		const clearedProjectSubagentWorker = await readFile(
+			join(modelsCwd, ".pi", "subagents", "worker.md"),
+			"utf8",
+		);
+		assert.doesNotMatch(clearedProjectSubagentWorker, /model:/);
+		assert.doesNotMatch(clearedProjectSubagentWorker, /thinking:/);
 
 		await writeFile(
 			globalModelsPath,
@@ -1059,6 +1179,8 @@ async function run() {
 					"sdd-apply": { model: "openai/gpt-5", thinking: "high" },
 					worker: { model: "openai/gpt-5-mini", thinking: "low" },
 					researcher: { model: "openai/gpt-5-mini", thinking: "low" },
+					"project-special": { model: "openai/gpt-5-mini", thinking: "low" },
+					"global-special": { model: "openai/gpt-5-mini", thinking: "low" },
 				},
 			});
 		await commands.get("gentle:models").handler("", ctx);
@@ -1088,19 +1210,48 @@ async function run() {
 		assert.match(applyAgent, /model: openai\/gpt-5/);
 		assert.match(applyAgent, /thinking: high/);
 
-		const settings = JSON.parse(
-			await readFile(join(modelsCwd, ".pi", "settings.json"), "utf8"),
+		const projectSubagents = JSON.parse(
+			await readFile(join(modelsCwd, ".pi", "subagents.json"), "utf8"),
 		);
 		assert.equal(
-			settings.subagents.agentOverrides.worker.model,
-			"openai/gpt-5-mini",
+			projectSubagents.model_profiles["sdd-apply"].model,
+			"openai/gpt-5",
 		);
-		assert.equal(settings.subagents.agentOverrides.worker.thinking, "low");
+		assert.equal(projectSubagents.model_profiles["sdd-apply"].effort, "high");
 		assert.equal(
-			settings.subagents.agentOverrides.researcher.model,
+			projectSubagents.model_profiles.worker.model,
 			"openai/gpt-5-mini",
 		);
-		assert.equal(settings.subagents.agentOverrides.researcher.thinking, "low");
+		assert.equal(projectSubagents.model_profiles.worker.effort, "low");
+		const routedProjectSubagentWorker = await readFile(
+			join(modelsCwd, ".pi", "subagents", "worker.md"),
+			"utf8",
+		);
+		assert.match(routedProjectSubagentWorker, /model: openai\/gpt-5-mini/);
+		assert.match(routedProjectSubagentWorker, /thinking: low/);
+		const shadowedProjectAgentWorker = await readFile(
+			join(modelsCwd, ".pi", "agents", "worker.md"),
+			"utf8",
+		);
+		assert.match(shadowedProjectAgentWorker, /model: existing\/project-worker/);
+		assert.match(shadowedProjectAgentWorker, /thinking: high/);
+		assert.equal(
+			projectSubagents.model_profiles["project-special"].model,
+			"openai/gpt-5-mini",
+		);
+		assert.equal(projectSubagents.model_profiles["project-special"].effort, "low");
+		const globalSubagents = JSON.parse(await readFile(globalSubagentsPath, "utf8"));
+		assert.equal(
+			globalSubagents.model_profiles.researcher.model,
+			"openai/gpt-5-mini",
+		);
+		assert.equal(globalSubagents.model_profiles.researcher.effort, "low");
+		assert.equal(
+			globalSubagents.model_profiles["global-special"].model,
+			"openai/gpt-5-mini",
+		);
+		assert.equal(globalSubagents.model_profiles["global-special"].effort, "low");
+		assert.equal(existsSync(join(modelsCwd, ".pi", "settings.json")), false);
 
 		const kittyE = "\x1b[101u";
 		assert.notEqual(kittyE, "e");
@@ -1196,6 +1347,7 @@ async function run() {
 	} finally {
 		await rm(modelsCwd, { recursive: true, force: true });
 		await rm(globalModelsPath, { force: true });
+		await rm(globalSubagentsPath, { force: true });
 	}
 
 	const registryCwd = await tempWorkspace();

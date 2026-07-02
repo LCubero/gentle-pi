@@ -88,9 +88,9 @@ pi
 ## Quick start
 
 ```text
-/gentle-ai:status          Check package, SDD assets, OpenSpec, and global model config.
-/gentle-ai:doctor          Run read-only diagnostics for SDD assets, config, tools, and guards.
-/gentle-ai:sdd-preflight   Run or reuse the session SDD preflight explicitly.
+/gentle:status          Check package, SDD assets, OpenSpec, and global model config.
+/gentle:doctor          Run read-only diagnostics for SDD assets, config, tools, and guards.
+/gentle:sdd-preflight   Run or reuse the session SDD preflight explicitly.
 /sdd-init                  Create or refresh openspec/config.yaml.
 /gentle:models             Assign global model/effort routing to SDD/custom agents.
 /gentle:persona            Switch between gentleman and neutral persona modes.
@@ -100,7 +100,7 @@ pi
 Typical flow:
 
 1. Open Pi in your repo.
-2. Run `/gentle-ai:status`.
+2. Run `/gentle:status`.
 3. Run `/sdd-init` once per project, or when test/project capabilities change. This also runs the session SDD preflight.
 4. For a substantial change, ask Pi to use SDD. Natural-language requests are classified by the parent agent, not by brittle runtime regexes.
 5. Review the phase artifacts instead of trusting floating chat context.
@@ -228,7 +228,7 @@ Engram-only mode is different by design: Engram is working memory and does not m
 
 ## SDD preflight and project files
 
-`gentle-pi` does not require SDD agents to be copied into every project. The package ensures global Pi SDD assets exist under the Pi agent home and treats project-local files only as overrides/debug copies. Slash SDD flows such as `/sdd-*`, `/sdd-init`, and the explicit `/gentle-ai:sdd-preflight` command run a lazy preflight and ask for session-scoped SDD preferences. For natural-language requests, the parent agent decides whether the work should use SDD and must run/reuse `/gentle-ai:sdd-preflight` before continuing.
+`gentle-pi` does not require SDD agents to be copied into every project. The package ensures global Pi SDD assets exist under the Pi agent home and treats project-local files only as overrides/debug copies. Slash SDD flows such as `/sdd-*`, `/sdd-init`, and the explicit `/gentle:sdd-preflight` command run a lazy preflight and ask for session-scoped SDD preferences. For natural-language requests, the parent agent decides whether the work should use SDD and must run/reuse `/gentle:sdd-preflight` before continuing.
 
 ```text
 ~/.pi/agent/agents/sdd-*.md
@@ -246,13 +246,12 @@ The preflight choices are reused for later SDD flows in the same session:
 It does **not** overwrite existing global assets unless you explicitly run:
 
 ```text
-/gentle-ai:install-sdd --force
+/gentle:install-sdd --force
 ```
 
-Manual preflight commands:
+Manual preflight command:
 
 ```text
-/gentle-ai:sdd-preflight
 /gentle:sdd-preflight
 ```
 
@@ -356,9 +355,11 @@ A project can still override the global default with:
 
 The modal discovers:
 
-- project agents in `.pi/agents/` and `.agents/`;
-- user agents in `~/.pi/agent/agents/` and `~/.agents/`;
+- project agents in `.pi/subagents/`, `.pi/agents/`, and `.agents/`;
+- user agents in `~/.pi/agent/subagents/`, `~/.pi/agent/agents/`, and `~/.agents/`;
 - built-in agents from `pi-subagents-j0k3r` when present.
+
+When applying routing, project agents write runtime profiles to `.pi/subagents.json`; global and built-in agents write profiles to `~/.pi/agent/subagents.json`.
 
 Recommended model/effort shape:
 
@@ -400,8 +401,8 @@ Legacy string entries are still accepted and treated as `model`-only config.
 
 | Command                          | What it does                                                        |
 | -------------------------------- | ------------------------------------------------------------------- |
-| `/gentle-ai:status`              | Shows package, SDD asset, OpenSpec, and global model config status. |
-| `/gentle-ai:doctor`              | Runs read-only diagnostics for SDD assets, model/persona config, memory tools, and safety guards. |
+| `/gentle:status`              | Shows package, SDD asset, OpenSpec, and global model config status. |
+| `/gentle:doctor`              | Runs read-only diagnostics for SDD assets, model/persona config, memory tools, and safety guards. |
 | `/gentle:models`                 | Opens global model + effort assignment UI. Press `x` to export and `r` to restore saved routing. |
 | `/gentle:persona`                | Switches global persona mode, with project override support.        |
 | `/gentle:banner`                 | Configures startup banner rose, text logo, and color preset.        |
@@ -409,14 +410,14 @@ Legacy string entries are still accepted and treated as `model`-only config.
 | `/gentle:toggle-text-logo`       | Toggles the startup text logo.                                      |
 | `/gentle:banner-color`           | Selects a startup banner color preset.                              |
 | `/sdd-init`                      | Initializes or refreshes `openspec/config.yaml`.                    |
-| `/gentle-ai:install-sdd`         | Repairs missing global SDD runtime assets without overwriting files. |
-| `/gentle-ai:install-sdd --force` | Force-refreshes installed global SDD assets.                         |
+| `/gentle:install-sdd`         | Repairs missing global SDD runtime assets without overwriting files. |
+| `/gentle:install-sdd --force` | Force-refreshes installed global SDD assets.                         |
 | `/skill-registry:refresh`        | Regenerates `.atl/skill-registry.md`.                               |
 | `/skill-creation`                | Creates or updates an LLM-first skill using the packaged `skill-creator` contract and style guide. |
 
 Package-owned global SDD runtime assets are also refreshed automatically on session start when `gentle-pi` changes. Project-local `.pi/agents` and `.pi/chains` remain manual overrides and are never overwritten by startup refresh.
 
-Startup banner settings are global and default to the current pink rose + text logo. Supported color presets are `pink`, `cyan`, `yellow`, and `green`. The `/gentle-ai:*` aliases are also available for every banner command.
+Startup banner settings are global and default to the current pink rose + text logo. Supported color presets are `pink`, `cyan`, `yellow`, and `green`.
 
 Startup flag:
 
@@ -425,19 +426,6 @@ pi --no-skill-registry
 ```
 
 Use it when you want skills available normally but do not want Gentle AI to refresh/watch `.atl/skill-registry.md` on startup. `pi -ns` / `pi --no-skills` also skip the registry startup work because Pi is already disabling skill loading.
-
-Compatibility aliases:
-
-```text
-/gentle-ai:models
-/gentleman:models
-/gentle-ai:persona
-/gentleman:persona
-/gentle-ai:banner
-/gentle-ai:toggle-rose
-/gentle-ai:toggle-text-logo
-/gentle-ai:banner-color
-```
 
 ## Included skills
 

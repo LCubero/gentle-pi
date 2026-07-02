@@ -585,12 +585,10 @@ export default function (pi: ExtensionAPI) {
       },
     });
   };
-  for (const prefix of ["gentle", "gentle-ai"] as const) {
-    registerBannerCommand(`${prefix}:banner`);
-    registerToggleCommand(`${prefix}:toggle-rose`, "showRose");
-    registerToggleCommand(`${prefix}:toggle-text-logo`, "showTextLogo");
-    registerColorCommand(`${prefix}:banner-color`);
-  }
+  registerBannerCommand("gentle:banner");
+  registerToggleCommand("gentle:toggle-rose", "showRose");
+  registerToggleCommand("gentle:toggle-text-logo", "showTextLogo");
+  registerColorCommand("gentle:banner-color");
 
   pi.on("session_start", async (_event, ctx) => {
     if (!ctx.hasUI) return;

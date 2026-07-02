@@ -69,4 +69,4 @@ Never request a subagent named `reviewer`; it is an intent, not an installed age
 
 If multiple rows match, run the narrow set that covers the risk. Example: shell integration that mutates live state should use `review-reliability` plus `review-resilience`, not `review-readability` by default.
 
-The package ensures SDD agents and chains are available as global Pi runtime assets. Project-local SDD files are overrides/debug copies only. Use `/gentle-ai:install-sdd --force` only for recovery or intentional global refresh.
+The package ensures SDD agents and chains are available as global Pi runtime assets. Project-local SDD files are overrides/debug copies only. Use `/gentle:install-sdd --force` only for recovery or intentional global refresh.

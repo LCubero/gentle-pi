@@ -69,9 +69,9 @@ This can start as internal testable logic without exposing a Pi command. Phase a
 
 Keep non-destructive install behavior by default, but surface drift:
 
-- `/gentle-ai:status` should report stale `.pi/agents/sdd-*.md` or `.pi/chains/sdd-*.chain.md`.
+- `/gentle:status` should report stale `.pi/agents/sdd-*.md` or `.pi/chains/sdd-*.chain.md`.
 - Preflight notification can say assets are installed but stale.
-- Force refresh remains explicit via `/gentle-ai:install-sdd --force`.
+- Force refresh remains explicit via `/gentle:install-sdd --force`.
 
 Avoid silently overwriting `.pi` because users may customize project agents.
 

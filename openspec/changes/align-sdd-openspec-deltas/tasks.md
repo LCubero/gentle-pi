@@ -49,9 +49,9 @@ Chain strategy: pending
 
 ### 4. Installed asset freshness
 
-- [x] 4.1 RED: add runtime-harness test showing `.pi/agents/sdd-spec.md` drift from `assets/agents/sdd-spec.md` is surfaced by `/gentle-ai:status` or preflight.
+- [x] 4.1 RED: add runtime-harness test showing `.pi/agents/sdd-spec.md` drift from `assets/agents/sdd-spec.md` is surfaced by `/gentle:status` or preflight.
 - [x] 4.2 GREEN: implement non-destructive drift detection.
-- [x] 4.3 Document `/gentle-ai:install-sdd --force` as the explicit refresh path.
+- [x] 4.3 Document `/gentle:install-sdd --force` as the explicit refresh path.
 
 ### 5. Example migration and verification
 

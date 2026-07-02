@@ -55,14 +55,14 @@ Do not guess the active change. If change selection is ambiguous, ask the user a
 
 ## Lazy SDD Preflight
 
-Do not ask SDD setup questions on session start. The first time the user initiates an SDD process in a Pi session, run the SDD preflight once and keep those choices for the rest of that session. Runtime trigger detection is intentionally deterministic: slash SDD flows and `/sdd-init` run preflight automatically; for natural-language requests, the parent/orchestrator decides semantically whether SDD is needed and must run/reuse `/gentle-ai:sdd-preflight` before continuing.
+Do not ask SDD setup questions on session start. The first time the user initiates an SDD process in a Pi session, run the SDD preflight once and keep those choices for the rest of that session. Runtime trigger detection is intentionally deterministic: slash SDD flows and `/sdd-init` run preflight automatically; for natural-language requests, the parent/orchestrator decides semantically whether SDD is needed and must run/reuse `/gentle:sdd-preflight` before continuing.
 
 **Hard gate:** `openspec/config.yaml`, existing SDD changes, installed `.pi`/global SDD assets, or a todo named "preflight" are not session preflight. They are project context only. Do not mark SDD preflight complete, start `sdd-init`, launch SDD subagents/chains, or move to explore/proposal/spec/design/tasks until this session has either:
 
 1. an injected `## SDD Session Preflight` block, or
 2. an explicit user answer in the current conversation covering all four preflight choices below.
 
-If neither exists and `/gentle-ai:sdd-preflight` cannot be invoked from the current context, ask the four choices manually with `ask_user_question` before any SDD phase work. Treat missing Engram availability as a reason to ask/confirm artifact store, not as permission to assume defaults.
+If neither exists and `/gentle:sdd-preflight` cannot be invoked from the current context, ask the four choices manually with `ask_user_question` before any SDD phase work. Treat missing Engram availability as a reason to ask/confirm artifact store, not as permission to assume defaults.
 
 The preflight captures:
 
@@ -78,7 +78,7 @@ The package should ensure SDD assets are present as global Pi runtime assets wit
 ~/.pi/agent/chains/sdd-*.chain.md
 ```
 
-Manual install commands are recovery/debug paths, not the happy path. `/gentle-ai:sdd-preflight` and `/gentle:sdd-preflight` are the explicit preflight commands for agent/orchestrator use. If the user explicitly changes SDD preferences later in the same session, follow the new instruction.
+Manual install commands are recovery/debug paths, not the happy path. `/gentle:sdd-preflight` is the explicit preflight command for agent/orchestrator use. If the user explicitly changes SDD preferences later in the same session, follow the new instruction.
 
 ## Init Guard
 

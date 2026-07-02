@@ -39,9 +39,9 @@ Status: complete
 - [x] 3.3 Added `detectLegacyFlatSpec` helper and tests for legacy flat `openspec/changes/{change}/spec.md`.
 - [x] 3.4 Added `analyzeDeltaDestructiveness` helper and test for REMOVED requirements and large MODIFIED blocks.
 - [x] 3.5 Added explicit `sdd-sync` phase and updated chains accordingly.
-- [x] 4.1 RED: added runtime-harness test showing stale `.pi` SDD assets are surfaced by `/gentle-ai:status`.
-- [x] 4.2 GREEN: implemented non-destructive asset drift detection in `/gentle-ai:status`.
-- [x] 4.3 Confirmed README already documents `/gentle-ai:install-sdd --force` as explicit refresh path.
+- [x] 4.1 RED: added runtime-harness test showing stale `.pi` SDD assets are surfaced by `/gentle:status`.
+- [x] 4.2 GREEN: implemented non-destructive asset drift detection in `/gentle:status`.
+- [x] 4.3 Confirmed README already documents `/gentle:install-sdd --force` as explicit refresh path.
 
 ## sdd-sync addition
 
@@ -80,7 +80,7 @@ Status: complete pending fresh review
 | Slice 2 native helpers  | `pnpm test` failed because `../lib/openspec-deltas.ts` did not exist.                         | Added `lib/openspec-deltas.ts`; `pnpm test` passed.                                        | Added failure tests for missing MODIFIED/REMOVED targets and duplicate/conflicting operations; LSP diagnostics clean. |
 | Slice 2 review fixes    | Regression tests failed for ADDED before post-Requirements sections and duplicate separators. | Fixed append spacing and cleaned trailing separators; `pnpm test` passed.                  | Added explicit REMOVED missing-target coverage.                                                                       |
 | Slice 3 guardrails      | `pnpm test` failed because `../lib/openspec-guardrails.ts` did not exist.                     | Added guardrail helpers; `pnpm test` passed.                                               | Added collision, legacy flat spec, and destructive delta tests.                                                       |
-| Slice 3 asset freshness | Runtime harness failed because `/gentle-ai:status` did not report stale SDD assets.           | Added status drift detection and warning; `pnpm test` passed.                              | Drift detection is non-destructive and points to `/gentle-ai:install-sdd --force`.                                    |
+| Slice 3 asset freshness | Runtime harness failed because `/gentle:status` did not report stale SDD assets.           | Added status drift detection and warning; `pnpm test` passed.                              | Drift detection is non-destructive and points to `/gentle:install-sdd --force`.                                    |
 | sdd-sync phase          | Runtime harness would not assert the new phase until added.                                   | Added `sdd-sync` asset, chains, routing, docs, and install assertions; `pnpm test` passed. | Archive now prefers explicit sync and allows archive-time sync only with parent approval.                             |
 
 ## Validation

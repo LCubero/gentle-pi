@@ -14,7 +14,7 @@ No canonical `openspec/specs/sdd-openspec/spec.md` existed before this change, s
 - Updated `assets/agents/sdd-archive.md` so archive requires completed sync or explicitly approved archive-time sync fallback.
 - Updated `assets/agents/sdd-sync.md` and `assets/agents/sdd-archive.md` to block on missing or non-passing verification evidence.
 - Updated README diagrams and artifact model docs for `verify → sync → archive`.
-- Updated `/gentle-ai:status` drift detection so missing packaged SDD assets count as stale.
+- Updated `/gentle:status` drift detection so missing packaged SDD assets count as stale.
 - Updated runtime harness assertions so lazy SDD preflight and `/sdd-init` install `sdd-sync.md`.
 - Updated package verification to require core SDD agents, chains, strict-TDD support files, and `sdd-sync`.
 
@@ -35,7 +35,7 @@ Results:
 
 ## Risks
 
-- Existing installed `.pi` assets remain stale until the user intentionally refreshes with `/gentle-ai:install-sdd --force`.
+- Existing installed `.pi` assets remain stale until the user intentionally refreshes with `/gentle:install-sdd --force`.
 - Helper functions support `ADDED`, `MODIFIED`, and `REMOVED`; `RENAMED` is intentionally not implemented yet.
 - This change adds native helper/prompt semantics; a fully automatic sync/archive command path remains a follow-up.
 

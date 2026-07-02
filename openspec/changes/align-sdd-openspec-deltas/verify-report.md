@@ -24,7 +24,7 @@ PASS locally for Slices 1-3 and explicit `sdd-sync` phase addition. Fresh review
   - detecting legacy flat `openspec/changes/{change}/spec.md` artifacts;
   - analyzing destructive deltas via REMOVED requirements and large MODIFIED blocks.
 - `tests/openspec-guardrails.test.ts` covers those guardrails.
-- `/gentle-ai:status` reports stale installed `.pi` SDD assets and points to `/gentle-ai:install-sdd --force`.
+- `/gentle:status` reports stale installed `.pi` SDD assets and points to `/gentle:install-sdd --force`.
 - `tests/runtime-harness.mjs` covers non-destructive asset drift reporting.
 
 ### Explicit sdd-sync phase
@@ -45,7 +45,7 @@ PASS locally for Slices 1-3 and explicit `sdd-sync` phase addition. Fresh review
 | Modified requirements preserve scenarios  | Covered by prompt contract and helper behavior | `sdd-spec` requires full-block MODIFIED; `applyDeltaSpec` replaces the full canonical block.                                     |
 | Cross-change collision warning            | Covered by helper/test                         | `detectActiveDomainCollisions` detects other active changes touching the same domain spec.                                       |
 | Destructive merge guard                   | Covered by prompt contract and helper/test     | `sdd-sync` and `sdd-archive` require explicit approval; `analyzeDeltaDestructiveness` reports REMOVED and large MODIFIED blocks. |
-| Installed SDD asset freshness visible     | Covered by status/runtime test                 | `/gentle-ai:status` reports stale `.pi` SDD assets and explicit force-refresh command.                                           |
+| Installed SDD asset freshness visible     | Covered by status/runtime test                 | `/gentle:status` reports stale `.pi` SDD assets and explicit force-refresh command.                                           |
 | Legacy flat specs detected                | Covered by helper/test                         | `detectLegacyFlatSpec` reports flat `spec.md` and whether domain specs also exist.                                               |
 | Sync-without-archive                      | Covered by prompt/chain/runtime install checks | `sdd-sync` exists as a phase and chains call it before archive.                                                                  |
 
@@ -79,7 +79,7 @@ Fresh Slice 2 reviewer found:
 
 Fresh Slice 3 reviewer found no blockers. Notes addressed:
 
-- Hardened `/gentle-ai:status` drift detection so unreadable or directory-shaped installed asset paths are counted as stale instead of throwing.
+- Hardened `/gentle:status` drift detection so unreadable or directory-shaped installed asset paths are counted as stale instead of throwing.
 - Updated `tasks.md` acceptance checklist and verification evidence to match completed work.
 
 Fresh `sdd-sync` reviewer found blockers. Addressed:

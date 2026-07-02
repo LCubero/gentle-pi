@@ -1004,14 +1004,16 @@ async function listBuiltinAgentNamesAsync(cwd: string): Promise<Set<string>> {
 }
 
 function listDiscoverableAgents(cwd: string): AgentEntry[] {
-	const globalAgentDir = join(gentlePiAgentHome(), "agents");
+	const globalAgentHome = gentlePiAgentHome();
 	const builtinDirs = builtinAgentDirs(cwd);
 	const agents = [
 		...builtinDirs.flatMap((dir) => listAgentsFromDir(dir, "builtin")),
-		...listAgentsFromDir(globalAgentDir, "user"),
+		...listAgentsFromDir(join(globalAgentHome, "agents"), "user"),
+		...listAgentsFromDir(join(globalAgentHome, "subagents"), "user"),
 		...listAgentsFromDir(join(homedir(), ".agents"), "user"),
 		...listAgentsFromDir(join(cwd, ".agents"), "project"),
 		...listAgentsFromDir(join(cwd, ".pi", "agents"), "project"),
+		...listAgentsFromDir(join(cwd, ".pi", "subagents"), "project"),
 	];
 	const byName = new Map<string, AgentEntry>();
 	for (const agent of agents) byName.set(agent.name, agent);
@@ -1019,17 +1021,19 @@ function listDiscoverableAgents(cwd: string): AgentEntry[] {
 }
 
 async function listDiscoverableAgentsAsync(cwd: string): Promise<AgentEntry[]> {
-	const globalAgentDir = join(gentlePiAgentHome(), "agents");
+	const globalAgentHome = gentlePiAgentHome();
 	const builtinDirs = builtinAgentDirs(cwd);
 	const agents: AgentEntry[] = [];
 	for (const dir of builtinDirs) {
 		agents.push(...(await listAgentsFromDirAsync(dir, "builtin")));
 	}
 	const otherDirs: Array<[string, AgentSource]> = [
-		[globalAgentDir, "user"],
+		[join(globalAgentHome, "agents"), "user"],
+		[join(globalAgentHome, "subagents"), "user"],
 		[join(homedir(), ".agents"), "user"],
 		[join(cwd, ".agents"), "project"],
 		[join(cwd, ".pi", "agents"), "project"],
+		[join(cwd, ".pi", "subagents"), "project"],
 	];
 	for (const [dir, source] of otherDirs) {
 		agents.push(...(await listAgentsFromDirAsync(dir, source)));
@@ -1049,92 +1053,179 @@ function orderDiscoverableAgents(agents: AgentEntry[]): AgentEntry[] {
 	return [...coreFirst, ...rest];
 }
 
-function projectSettingsPath(cwd: string): string {
-	return join(cwd, ".pi", "settings.json");
-}
-
 function isClearRoutingEntry(entry: AgentRoutingEntry): boolean {
 	return entry.model === undefined && entry.thinking === undefined;
 }
 
-function updateBuiltinModelOverride(
-	cwd: string,
+function agentModelProfileConfigPath(cwd: string, source: AgentSource): string {
+	return source === "project"
+		? join(cwd, ".pi", "subagents.json")
+		: join(gentlePiAgentHome(), "subagents.json");
+}
+
+function modelProfileForRoutingEntry(
+	entry: AgentRoutingEntry | undefined,
+): Record<string, string> | undefined {
+	if (!entry || isClearRoutingEntry(entry)) return undefined;
+	const profile: Record<string, string> = {};
+	if (entry.model) profile.model = entry.model;
+	if (entry.thinking) profile.effort = entry.thinking;
+	return Object.keys(profile).length > 0 ? profile : undefined;
+}
+
+function updateSubagentModelProfileAtPath(
+	path: string,
 	name: string,
 	entry: AgentRoutingEntry | undefined,
+	options: { preserveExisting?: boolean } = {},
 ): boolean {
-	const path = projectSettingsPath(cwd);
-	let settings: Record<string, unknown> = {};
+	let config: Record<string, unknown> = {};
 	if (existsSync(path)) {
 		try {
 			const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-			if (isRecord(parsed)) settings = parsed;
+			if (isRecord(parsed)) config = { ...parsed };
 		} catch {
-			settings = {};
+			config = {};
 		}
 	}
-	const subagents = isRecord(settings.subagents)
-		? { ...settings.subagents }
+	const modelProfiles = isRecord(config.model_profiles)
+		? { ...config.model_profiles }
 		: {};
-	const agentOverrides = isRecord(subagents.agentOverrides)
-		? { ...subagents.agentOverrides }
-		: {};
-	const current = isRecord(agentOverrides[name])
-		? { ...agentOverrides[name] }
-		: {};
-	if (entry?.model === undefined) delete current.model;
-	else current.model = entry.model;
-	if (entry?.thinking === undefined) delete current.thinking;
-	else current.thinking = entry.thinking;
-	if (Object.keys(current).length > 0) agentOverrides[name] = current;
-	else delete agentOverrides[name];
-	if (Object.keys(agentOverrides).length > 0)
-		subagents.agentOverrides = agentOverrides;
-	else delete subagents.agentOverrides;
-	if (Object.keys(subagents).length > 0) settings.subagents = subagents;
-	else delete settings.subagents;
+	const profile = modelProfileForRoutingEntry(entry);
+	if (profile) {
+		if (options.preserveExisting && isRecord(modelProfiles[name])) return false;
+		modelProfiles[name] = profile;
+	} else delete modelProfiles[name];
+	if (Object.keys(modelProfiles).length > 0) config.model_profiles = modelProfiles;
+	else delete config.model_profiles;
 	mkdirSync(dirname(path), { recursive: true });
-	writeFileSync(path, `${JSON.stringify(settings, null, "\t")}\n`);
+	writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
 	return true;
 }
 
-async function updateBuiltinModelOverrideAsync(
-	cwd: string,
+async function updateSubagentModelProfileAtPathAsync(
+	path: string,
 	name: string,
 	entry: AgentRoutingEntry | undefined,
+	options: { preserveExisting?: boolean } = {},
 ): Promise<boolean> {
-	const path = projectSettingsPath(cwd);
-	let settings: Record<string, unknown> = {};
+	let config: Record<string, unknown> = {};
 	if (await pathExists(path)) {
 		try {
 			const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
-			if (isRecord(parsed)) settings = parsed;
+			if (isRecord(parsed)) config = { ...parsed };
 		} catch {
-			settings = {};
+			config = {};
 		}
 	}
+	const modelProfiles = isRecord(config.model_profiles)
+		? { ...config.model_profiles }
+		: {};
+	const profile = modelProfileForRoutingEntry(entry);
+	if (profile) {
+		if (options.preserveExisting && isRecord(modelProfiles[name])) return false;
+		modelProfiles[name] = profile;
+	} else delete modelProfiles[name];
+	if (Object.keys(modelProfiles).length > 0) config.model_profiles = modelProfiles;
+	else delete config.model_profiles;
+	await mkdir(dirname(path), { recursive: true });
+	await writeFile(path, `${JSON.stringify(config, null, 2)}\n`);
+	return true;
+}
+
+function updateSubagentModelProfile(
+	cwd: string,
+	source: AgentSource,
+	name: string,
+	entry: AgentRoutingEntry | undefined,
+	options: { preserveExisting?: boolean } = {},
+): boolean {
+	return updateSubagentModelProfileAtPath(
+		agentModelProfileConfigPath(cwd, source),
+		name,
+		entry,
+		options,
+	);
+}
+
+function projectSettingsPath(cwd: string): string {
+	return join(cwd, ".pi", "settings.json");
+}
+
+function removeLegacyAgentOverridesFromSettings(
+	settingsPath: string,
+	settings: Record<string, unknown>,
+): void {
 	const subagents = isRecord(settings.subagents)
 		? { ...settings.subagents }
-		: {};
-	const agentOverrides = isRecord(subagents.agentOverrides)
-		? { ...subagents.agentOverrides }
-		: {};
-	const current = isRecord(agentOverrides[name])
-		? { ...agentOverrides[name] }
-		: {};
-	if (entry?.model === undefined) delete current.model;
-	else current.model = entry.model;
-	if (entry?.thinking === undefined) delete current.thinking;
-	else current.thinking = entry.thinking;
-	if (Object.keys(current).length > 0) agentOverrides[name] = current;
-	else delete agentOverrides[name];
-	if (Object.keys(agentOverrides).length > 0)
-		subagents.agentOverrides = agentOverrides;
-	else delete subagents.agentOverrides;
+		: undefined;
+	if (!subagents) return;
+	delete subagents.agentOverrides;
 	if (Object.keys(subagents).length > 0) settings.subagents = subagents;
 	else delete settings.subagents;
-	await mkdir(dirname(path), { recursive: true });
-	await writeFile(path, `${JSON.stringify(settings, null, "\t")}\n`);
-	return true;
+	mkdirSync(dirname(settingsPath), { recursive: true });
+	writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+}
+
+function isValidJsonObjectFileOrMissing(path: string): boolean {
+	if (!existsSync(path)) return true;
+	try {
+		return isRecord(JSON.parse(readFileSync(path, "utf8")));
+	} catch {
+		return false;
+	}
+}
+
+function migrateLegacyProjectModelOverrides(cwd: string): number {
+	const settingsPath = projectSettingsPath(cwd);
+	if (!existsSync(settingsPath)) return 0;
+	let settings: Record<string, unknown>;
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(settingsPath, "utf8"));
+		if (!isRecord(parsed)) return 0;
+		settings = { ...parsed };
+	} catch {
+		return 0;
+	}
+	const subagents = isRecord(settings.subagents) ? settings.subagents : undefined;
+	const agentOverrides = isRecord(subagents?.agentOverrides)
+		? subagents.agentOverrides
+		: undefined;
+	if (!agentOverrides) return 0;
+	const agentsByName = new Map(listDiscoverableAgents(cwd).map((agent) => [agent.name, agent]));
+	const migratableEntries = Object.entries(agentOverrides)
+		.map(([name, value]) => ({ name, entry: normalizeRoutingEntry(value) }))
+		.filter((item): item is { name: string; entry: AgentRoutingEntry } =>
+			item.entry !== undefined && !isClearRoutingEntry(item.entry),
+		);
+	const targetPaths = new Set(
+		migratableEntries.map(({ name }) =>
+			agentModelProfileConfigPath(cwd, agentsByName.get(name)?.source ?? "project"),
+		),
+	);
+	if (![...targetPaths].every(isValidJsonObjectFileOrMissing)) return 0;
+	let migrated = 0;
+	for (const { name, entry } of migratableEntries) {
+		const source = agentsByName.get(name)?.source ?? "project";
+		if (updateSubagentModelProfile(cwd, source, name, entry, { preserveExisting: true })) migrated += 1;
+	}
+	removeLegacyAgentOverridesFromSettings(settingsPath, settings);
+	return migrated;
+}
+
+async function updateSubagentModelProfileAsync(
+	cwd: string,
+	source: AgentSource,
+	name: string,
+	entry: AgentRoutingEntry | undefined,
+	options: { preserveExisting?: boolean } = {},
+): Promise<boolean> {
+	return updateSubagentModelProfileAtPathAsync(
+		agentModelProfileConfigPath(cwd, source),
+		name,
+		entry,
+		options,
+	);
 }
 
 export function applyModelConfig(
@@ -1143,28 +1234,17 @@ export function applyModelConfig(
 ): { updated: number; skipped: number } {
 	let updated = 0;
 	let skipped = 0;
-	const builtinNames = listBuiltinAgentNames(cwd);
 	const seenAgents = new Set<string>();
 	for (const agent of listDiscoverableAgents(cwd)) {
 		seenAgents.add(agent.name);
 		const entry = config[agent.name];
-		if (agent.source === "builtin") {
-			if (entry === undefined) {
-				skipped += 1;
-				continue;
-			}
-			if (updateBuiltinModelOverride(cwd, agent.name, entry)) updated += 1;
-			else skipped += 1;
-			continue;
-		}
 		if (entry === undefined) {
 			skipped += 1;
 			continue;
 		}
-		if (builtinNames.has(agent.name) || isClearRoutingEntry(entry)) {
-			if (updateBuiltinModelOverride(cwd, agent.name, entry)) updated += 1;
-			else skipped += 1;
-		}
+		if (updateSubagentModelProfile(cwd, agent.source, agent.name, entry)) updated += 1;
+		else skipped += 1;
+		if (agent.source === "builtin") continue;
 		if (!agent.filePath || !existsSync(agent.filePath)) {
 			skipped += 1;
 			continue;
@@ -1180,7 +1260,7 @@ export function applyModelConfig(
 	}
 	for (const [name, entry] of Object.entries(config)) {
 		if (!seenAgents.has(name) && isClearRoutingEntry(entry)) {
-			if (updateBuiltinModelOverride(cwd, name, entry)) updated += 1;
+			if (updateSubagentModelProfile(cwd, "user", name, entry)) updated += 1;
 			else skipped += 1;
 		}
 	}
@@ -1193,30 +1273,18 @@ export async function applyModelConfigAsync(
 ): Promise<{ updated: number; skipped: number }> {
 	let updated = 0;
 	let skipped = 0;
-	const builtinNames = await listBuiltinAgentNamesAsync(cwd);
 	const seenAgents = new Set<string>();
 	for (const agent of await listDiscoverableAgentsAsync(cwd)) {
 		seenAgents.add(agent.name);
 		const entry = config[agent.name];
-		if (agent.source === "builtin") {
-			if (entry === undefined) {
-				skipped += 1;
-				continue;
-			}
-			if (await updateBuiltinModelOverrideAsync(cwd, agent.name, entry))
-				updated += 1;
-			else skipped += 1;
-			continue;
-		}
 		if (entry === undefined) {
 			skipped += 1;
 			continue;
 		}
-		if (builtinNames.has(agent.name) || isClearRoutingEntry(entry)) {
-			if (await updateBuiltinModelOverrideAsync(cwd, agent.name, entry))
-				updated += 1;
-			else skipped += 1;
-		}
+		if (await updateSubagentModelProfileAsync(cwd, agent.source, agent.name, entry))
+			updated += 1;
+		else skipped += 1;
+		if (agent.source === "builtin") continue;
 		if (!agent.filePath || !(await pathExists(agent.filePath))) {
 			skipped += 1;
 			continue;
@@ -1232,7 +1300,7 @@ export async function applyModelConfigAsync(
 	}
 	for (const [name, entry] of Object.entries(config)) {
 		if (!seenAgents.has(name) && isClearRoutingEntry(entry)) {
-			if (await updateBuiltinModelOverrideAsync(cwd, name, entry))
+			if (await updateSubagentModelProfileAsync(cwd, "user", name, entry))
 				updated += 1;
 			else skipped += 1;
 		}
@@ -1785,6 +1853,7 @@ async function showSddModelPanel(
 }
 
 async function handleModelsCommand(ctx: ExtensionContext): Promise<void> {
+	migrateLegacyProjectModelOverrides(ctx.cwd);
 	const savedConfig = await readSavedModelConfigAsync(ctx.cwd);
 	if (savedConfig.status === "invalid") {
 		ctx.ui.notify(
@@ -2078,6 +2147,7 @@ export default function gentleAi(pi: ExtensionAPI): void {
 	pi.on("session_start", async (_event, ctx) => {
 		try {
 			const installResult = installSddAssets(ctx.cwd, true);
+			migrateLegacyProjectModelOverrides(ctx.cwd);
 			const modelResult = await applySavedModelConfig(ctx);
 			if (ctx.hasUI && modelResult.invalidPath) {
 				ctx.ui.notify(
@@ -2153,7 +2223,7 @@ export default function gentleAi(pi: ExtensionAPI): void {
 		return confirmCommand(event.input.command, ctx);
 	});
 
-	pi.registerCommand("gentle-ai:install-sdd", {
+	pi.registerCommand("gentle:install-sdd", {
 		description:
 			"Repair or refresh global Gentle AI SDD subagent and chain assets.",
 		handler: async (args, ctx) => {
@@ -2166,16 +2236,9 @@ export default function gentleAi(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerCommand("gentle-ai:sdd-preflight", {
+	pi.registerCommand("gentle:sdd-preflight", {
 		description:
 			"Run or reuse the lazy SDD preflight for this Pi session.",
-		handler: async (_args, ctx) => {
-			await runSddPreflight(ctx);
-		},
-	});
-
-	pi.registerCommand("gentle:sdd-preflight", {
-		description: "Compatibility alias for /gentle-ai:sdd-preflight.",
 		handler: async (_args, ctx) => {
 			await runSddPreflight(ctx);
 		},
@@ -2202,13 +2265,6 @@ export default function gentleAi(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerCommand("gentle-ai:sdd-status", {
-		description: "Compatibility alias for /sdd-status.",
-		handler: async (args, ctx) => {
-			handleSddStatusCommand(args, ctx);
-		},
-	});
-
 	const handleSddContinueCommand = (args: string, ctx: ExtensionContext) => {
 		const parsed = parseSddStatusCommandArgs(args);
 		const status = resolveSddStatus({
@@ -2230,29 +2286,8 @@ export default function gentleAi(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerCommand("gentle-ai:sdd-continue", {
-		description: "Compatibility alias for /sdd-continue.",
-		handler: async (args, ctx) => {
-			handleSddContinueCommand(args, ctx);
-		},
-	});
-
 	pi.registerCommand("gentle:models", {
 		description: "Configure global per-agent models for el Gentleman.",
-		handler: async (_args, ctx) => {
-			await handleModelsCommand(ctx);
-		},
-	});
-
-	pi.registerCommand("gentle-ai:models", {
-		description: "Compatibility alias for /gentle:models.",
-		handler: async (_args, ctx) => {
-			await handleModelsCommand(ctx);
-		},
-	});
-
-	pi.registerCommand("gentleman:models", {
-		description: "Compatibility alias for /gentle:models.",
 		handler: async (_args, ctx) => {
 			await handleModelsCommand(ctx);
 		},
@@ -2265,21 +2300,7 @@ export default function gentleAi(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerCommand("gentle-ai:persona", {
-		description: "Compatibility alias for /gentle:persona.",
-		handler: async (_args, ctx) => {
-			await handlePersonaCommand(ctx);
-		},
-	});
-
-	pi.registerCommand("gentleman:persona", {
-		description: "Compatibility alias for /gentle:persona.",
-		handler: async (_args, ctx) => {
-			await handlePersonaCommand(ctx);
-		},
-	});
-
-	pi.registerCommand("gentle-ai:doctor", {
+	pi.registerCommand("gentle:doctor", {
 		description: "Run read-only Gentle AI diagnostics for this Pi workspace.",
 		handler: async (_args, ctx) => {
 			const agentsInstalled = existsSync(
@@ -2311,7 +2332,7 @@ export default function gentleAi(pi: ExtensionAPI): void {
 				`${engramActive ? "pass" : "warn"}: Engram memory tools ${engramActive ? "active" : "not active in this session"}`,
 			];
 			if (!agentsInstalled || !chainsInstalled) {
-				lines.push("remedy: run /gentle-ai:install-sdd --force to refresh global SDD assets intentionally");
+				lines.push("remedy: run /gentle:install-sdd --force to refresh global SDD assets intentionally");
 			}
 			if (modelConfig.status === "invalid") {
 				lines.push(`remedy: fix or remove ${modelConfig.path}`);
@@ -2326,7 +2347,7 @@ export default function gentleAi(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerCommand("gentle-ai:status", {
+	pi.registerCommand("gentle:status", {
 		description: "Show Gentle AI package status for this project.",
 		handler: async (_args, ctx) => {
 			const agentsInstalled = existsSync(
@@ -2349,7 +2370,7 @@ export default function gentleAi(pi: ExtensionAPI): void {
 					`Global SDD chains: ${chainsInstalled ? "installed" : "not installed"}`,
 					`Global SDD assets stale: ${staleSddAssets} file(s)${
 						staleSddAssets > 0
-							? " — run /gentle-ai:install-sdd --force to refresh intentionally"
+							? " — run /gentle:install-sdd --force to refresh intentionally"
 							: ""
 					}`,
 					`Project-local SDD agent overrides: ${localSddAgentOverrides} file(s)${
