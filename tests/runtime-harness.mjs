@@ -368,6 +368,11 @@ async function run() {
 		const denied = await toolHook({ toolName: "bash", input: { command: "rm -rf /" } }, createCtx(toolCwd));
 		assert.equal(denied.block, true);
 		assert.match(denied.reason, /destructive/);
+		const reviewDispatch = { agent: "review-risk", task: "review", mode: "task" };
+		const missingReviewView = await toolHook({ toolName: "subagent_run", input: reviewDispatch }, createCtx(toolCwd));
+		assert.equal(missingReviewView.block, true);
+		assert.match(missingReviewView.reason, /candidate view/i);
+		assert.equal(reviewDispatch.task, "review", "blocked review dispatch must not mutate child input");
 		const sensitiveRead = await toolHook({ toolName: "read", input: { path: join(toolCwd, ".env.local") } }, createCtx(toolCwd));
 		assert.equal(sensitiveRead.block, true);
 		assert.match(sensitiveRead.reason, /sensitive path/);

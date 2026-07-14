@@ -1,0 +1,47 @@
+change: consolidate-review-parity-runtime
+schema: spec-driven
+created: "2026-07-13"
+status: apply-complete-review-approved
+artifact_store: openspec
+phases:
+  proposal: complete
+  specs: complete
+  design: complete-revised-v2.1.4
+  tasks: complete-final-migration
+  apply: complete
+  verify: ready-independent-verification
+  sync: complete
+  archive: pending
+notes:
+  - "Execution mode is automatic; proposal assumptions and the one-PR unlimited size exception remain unchanged."
+  - "Scope remains exactly issues #96, #113, #119, #122, #123, #124, #128, #129, #133, and #137 plus the protected package-local Gentle AI provisioning baseline."
+  - "WU-01, I1-I5, F1, B1, B2, and their evidence remain complete and preserved. Historical WU-02/I5 known-red output remains superseded fixture evidence only."
+  - "B1 #96 immutable candidate-view behavior and B2 #119/#133 exact projection/pre-commit authorization must not be reopened or discarded; real parity and full tests must be rerun after the runtime migration."
+  - "The released compatibility boundary is now Gentle AI v2.1.3, published 2026-07-13T16:33:06Z from commit 5317daca8e59d7554d87dbd1a8207c3fc0847dc6."
+  - "The next task revision must migrate the exact package-local pin, six official archive digests, integrity metadata, native adapter, fixtures, tests, and guidance from 2.1.2 to 2.1.3."
+  - "v2.1.3 START action and lenses_required are authoritative: reuse-receipt and false-lenses resumed routes dispatch no lenses; blocked-scope-action fails closed; exact replay prevents duplicate budgets."
+  - "Controller INSPECT remains mandatory and may route a clean local preflight to v2.1.3 START only while truthfully reporting that native general read-only status/inventory is unsupported and incomplete."
+  - "Pi must not add --committed-only implicitly. Dirty tracked content plus baseRef remains a native fail-closed rejection unless a separately specified future typed input explicitly authorizes committed-only behavior."
+  - "Trackers #1247, #1248, and #1249 remain valid and must be preserved. No authority fabrication, private-store reconstruction, bypass, destructive reset, global binary fallback, or v2.1.2 fallback is authorized."
+  - "C1 is complete: v2.1.3 is provisioned and verified, parity/full/package tests pass, and Pi /reload identity proof confirms the current session uses the v2.1.3 adapter."
+  - "C2 incident: seven valid historical compact-v2 lineages unrelated to the current candidate caused presence-based inspectionBlocksNativeStart legacy-read-only routing; exact RESET was rejected before mutation because valid compact history is not reset-eligible."
+  - "C2 must classify compact-authority applicability to the frozen candidate/scope, preserve matching claimants, keep unsafe matching/ambiguous/invalid cases closed, and prove exact no-mutation evidence before final review."
+  - "C3 implementation is complete and verified locally: parent tool_call mutates only task-mode review subagent_run dispatch with a bounded controller-owned candidate-view block; missing, mixed, stale, malformed, conflicting, unsafe, or non-task dispatches fail closed. Reload is required before a fresh native lineage and 4R review."
+  - "C4 implementation is complete and locally verified: CandidateView retains full-tree integrity checks while public actor context contains a Git-derived compact changed scope with explicit deletions and exact present modes. Reload and all authority-bound follow-up remain pending; no review authority was accessed or mutated."
+next_recommended: verify-after-content-bound-review
+
+synchronization:
+  final_bounded_migration:
+    lineage: review-ca0c5ee1e22c737c
+    status: approved
+    runtime: gentle-ai-v2.1.4
+    provenance: resolved
+    official_assets_verified: 6
+    upstream_merge: "#1255/#1258 734f8c19c186751d3870e338246cc3671f6c6211"
+    linux_amd64_manifest_binary_sha256: aa60f95186520d6e8c70bb9cca8d8a5735adbc3b69576519d35e32754aed261a
+    approved_lineage_revision: sha256:5cd2d7a263f1327ef1bc54587de4d717b31c7660002931c8268ac66c49d69f87
+    receipt_final_tree: be5daf06771c947ed1f544285163b4821e5a6cfb
+    sdd_binding_revision: sha256:ac5146818c566518ae2512aaa8a60f738479905aec6823ed8c1e20c5b1d47bc1
+  next_phase: independent-verification
+  final_sdd_verify_pass: false
+  lifecycle_delivery_validated: false

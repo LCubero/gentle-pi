@@ -396,7 +396,7 @@ test("controller publicly installs a supersession and exactly replays it with fr
 	const durableBytes = canonicalJsonV1(chain[0]!);
 	assert.equal(resolveReviewAuthorityForChange(fixture.repository, changeName)?.record.state.lineage_id, successorLineageId);
 
-	const command = "git commit -am recovered";
+	const command = "git commit -m recovered";
 	await assert.rejects(
 		controller.execute("missing-recovered-change", {
 			operation: "validate",
@@ -781,7 +781,7 @@ test("controller routes legacy authority through explicit reset, verifies clean,
 	const { controller, toolCall } = registerRuntime();
 	const ctx = extensionContext(fixture.repository);
 	await approveTrackedWorktreeTransaction(controller, ctx, "before-reset");
-	const command = "git commit -am before-reset";
+	const command = "git commit -m before-reset";
 	await controllerCall(controller, ctx, { operation: "validate", lineageId: "before-reset", idempotencyKey: "before-reset-gate", command, input: "{}" });
 	createLegacyReviewAuthority(fixture.repository);
 
@@ -950,7 +950,7 @@ test("controller INSPECT preserves the durable recovery request after interrupte
 	const { controller, toolCall } = registerRuntime();
 	const ctx = extensionContext(fixture.repository);
 	await approveTrackedWorktreeTransaction(controller, ctx, "before-recover");
-	const command = "git commit -am before-recover";
+	const command = "git commit -m before-recover";
 	await controllerCall(controller, ctx, { operation: "validate", lineageId: "before-recover", idempotencyKey: "before-recover-gate", command, input: "{}" });
 	createLegacyReviewAuthority(fixture.repository);
 	const inspected = await controllerCall(controller, ctx, { operation: "inspect" });
@@ -1122,7 +1122,7 @@ test("general STATUS returns the typed native-status-unsupported boundary withou
 		inventory_complete: false,
 		next_action: "require-upstream-read-only-native-status-inventory",
 		evidence: {
-			native_contract: "gentle-ai/2.1.2",
+			native_contract: "gentle-ai/2.1.4",
 			general_status: "unsupported",
 			claimant_inventory: "unsupported",
 		},
@@ -1217,13 +1217,14 @@ test("shipped controller and orchestrator contracts specify inspect-first compac
 	}
 });
 
-test("registered controller creates, advances, reports, and authorizes an exact all-tracked commit once", async (t) => {
+test("registered controller creates, advances, reports, and authorizes an exact staged commit once", async (t) => {
 	const fixture = createRepository(t, false);
 	const { controller, toolCall } = registerRuntime();
 	const ctx = extensionContext(fixture.repository);
 	await approveTrackedWorktreeTransaction(controller, ctx, "controller-lifecycle");
+	git(fixture.repository, "add", "--", "app.ts");
 
-	const command = "git commit -am bounded";
+	const command = "git commit -m bounded";
 	const validated = await controllerCall(controller, ctx, {
 		operation: "validate",
 		lineageId: "controller-lifecycle",
@@ -1242,21 +1243,15 @@ test("registered controller creates, advances, reports, and authorizes an exact 
 	assert.match(replay?.reason ?? "", /registered review controller authorization/i);
 
 	const splitAllCommand = "git commit -a -m bounded";
-	const splitAllValidated = await controllerCall(controller, ctx, {
-		operation: "validate",
-		lineageId: "controller-lifecycle",
-		idempotencyKey: "controller-lifecycle-gate-split-all",
-		command: splitAllCommand,
-		input: JSON.stringify({ scopeBudget: budget() }),
-	});
-	assert.equal(
-		(splitAllValidated.result as Record<string, unknown>).status,
-		"allow",
-		JSON.stringify(splitAllValidated),
-	);
-	assert.equal(
-		await toolCall({ toolName: "bash", input: { command: splitAllCommand } }, ctx),
-		undefined,
+	await assert.rejects(
+		controllerCall(controller, ctx, {
+			operation: "validate",
+			lineageId: "controller-lifecycle",
+			idempotencyKey: "controller-lifecycle-gate-split-all",
+			command: splitAllCommand,
+			input: JSON.stringify({ scopeBudget: budget() }),
+		}),
+		/cannot be exactly proven/i,
 	);
 
 	const fabricated = await toolCall(
@@ -1728,7 +1723,7 @@ test("failed or unprovable release fast-path conditions fall back to native rece
 				operation: "validate",
 				lineageId: "controller-fast-path-wrong-event",
 				idempotencyKey: "release-evidence-wrong-event",
-				command: "git commit -am bounded",
+				command: "git commit -m bounded",
 				input: JSON.stringify({
 					scopeBudget: budget(),
 					release: { protected_ref: "refs/heads/main", remote: "origin", ci: { revision: fixture.finalCommit, status: "success" }, external_evidence: "none", post_incident: false },

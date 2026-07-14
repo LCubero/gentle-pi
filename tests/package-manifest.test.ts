@@ -115,12 +115,23 @@ test("package verification names the native review runtime boundary and packaged
 
 	assert.ok(manifest.files?.includes("lib/"), "the published package must include the native review runtime module directory");
 	assert.match(verifier, /"lib\/native-review-cli\.ts"/, "package verification must require the native review adapter from the packaged runtime");
-	assert.match(verifier, /"tests\/fixtures\/native-review-cli\/v2\.1\.2\/start\.json"/, "package verification must retain the pinned native decoder fixture");
+	assert.match(verifier, /"tests\/fixtures\/native-review-cli\/v2\.1\.3\/start\.json"/, "package verification must retain the pinned native decoder fixture");
 	assert.match(
 		readFileSync(join(PACKAGE_ROOT, "extensions", "gentle-ai.ts"), "utf8"),
 		/createNativeReviewCli\(\)/,
 		"the production extension must construct its native client from the packaged runtime module",
 	);
+});
+
+test("package manifest ships and runs the checked-in package-local Gentle AI installer", () => {
+	const packageJson = readPackageJson();
+	const verifier = readFileSync(join(PACKAGE_ROOT, "scripts", "verify-package-files.mjs"), "utf8");
+
+	assert.equal(packageJson.scripts?.postinstall, "node scripts/install-gentle-ai.mjs");
+	assert.ok(packageJson.files?.includes("scripts/"));
+	assert.match(verifier, /"scripts\/install-gentle-ai\.mjs"/);
+	assert.match(verifier, /"scripts\/gentle-ai-installer\.mjs"/);
+	assert.match(verifier, /"lib\/gentle-ai-binary\.ts"/);
 });
 
 test("package manifest installs pi-pretty through a wrapper without bundling native optional dependencies", () => {
