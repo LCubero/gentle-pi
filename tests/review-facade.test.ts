@@ -69,6 +69,31 @@ test("ordinary facade derives compact start authority and finalizes a clean revi
 	assert.equal(replay.state, "approved");
 });
 
+test("#137 same-projection discovery ignores unrelated historical and escalated lineages", (t) => {
+	const root = repository(t);
+	const policyHash = "a".repeat(64);
+	const historical = startCompactReview({ cwd: root, lineageId: "historical", policyHash });
+	finalizeCompactReview({
+		cwd: root,
+		lineageId: historical.lineage_id,
+		review_result: { lens_results: [{ findings: [], evidence: ["historical candidate"] }] },
+		final_evidence: "historical verification",
+		final_verification_passed: true,
+	});
+	writeFileSync(join(root, "value.ts"), "export const value = 3;\n");
+	const escalated = startCompactReview({ cwd: root, lineageId: "escalated", policyHash });
+	finalizeCompactReview({
+		cwd: root,
+		lineageId: escalated.lineage_id,
+		review_result: { lens_results: [{ findings: [], evidence: ["escalated candidate"] }] },
+		final_evidence: "verification failed",
+		final_verification_passed: false,
+	});
+	writeFileSync(join(root, "value.ts"), "export const value = 4;\n");
+	const current = startCompactReview({ cwd: root, lineageId: "current", policyHash });
+	assert.equal(current.state, "reviewing");
+});
+
 test("facade exposes native refuter IDs without mutation before an identical second call", (t) => {
 	const root = repository(t);
 	const started = startCompactReview({ cwd: root, policyHash: "a".repeat(64) });

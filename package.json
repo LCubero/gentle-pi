@@ -35,6 +35,7 @@
     "README.md"
   ],
   "scripts": {
+    "postinstall": "node scripts/install-gentle-ai.mjs",
     "test": "node --experimental-strip-types --test tests/*.test.ts && pnpm run test:harness",
     "test:harness": "node --experimental-strip-types tests/runtime-harness.mjs",
     "prepack": "pnpm test && node scripts/verify-package-files.mjs",

@@ -83,6 +83,7 @@ import {
 import {
 	COMPACT_AUTHORITY_OUTCOME,
 	compactV2LineageExists,
+	discoverCompactReviewStores,
 	graphV1LineageExists,
 	hasGraphV1Authority,
 	inspectCompactReviewAuthorityV2,
@@ -94,6 +95,7 @@ import {
 	ReviewRepositoryError,
 	resolveRepositoryAuthorityV1,
 } from "../lib/review-repository.ts";
+import { captureLiveReviewCandidateBinding } from "../lib/review-snapshot.ts";
 import {
 	EXTERNAL_RELEASE_EVIDENCE,
 	GATE_RESULT,
@@ -128,6 +130,7 @@ import {
 	type ReviewProjectionV1,
 } from "../lib/review-snapshot.ts";
 import { sanitizeTerminalText, stripAnsi } from "../lib/terminal-theme.ts";
+import { CandidateViewError, CandidateViewRegistry, injectReviewCandidateView } from "../lib/review-candidate-view.ts";
 import {
 	createNativeReviewCli,
 	isCanonicalProcessString,
@@ -2418,6 +2421,7 @@ interface NativeReviewAuthorizationContext {
 	lineage_id: string;
 	store_revision: string;
 	fingerprint: string;
+	intended_tree?: string;
 }
 
 interface PendingReviewAuthorization {
@@ -3477,15 +3481,14 @@ function commitIncludesAllTracked(arguments_: readonly string[]): boolean {
 			throw new Error(`Unsupported commit tree semantics: ${argument}`);
 		}
 		if (argument === "-a" || argument === "--all") {
-			includesAllTracked = true;
-			continue;
+			throw new Error("Commit --all cannot be exactly proven against the frozen reviewed projection");
 		}
 		if (/^-[^-]+$/.test(argument) && argument.length > 2) {
 			const flags = argument.slice(1);
 			if (/[^aemnsqv]/.test(flags)) {
 				throw new Error(`Unsupported combined commit option: ${argument}`);
 			}
-			if (flags.includes("a")) includesAllTracked = true;
+			if (flags.includes("a")) throw new Error("Commit --all cannot be exactly proven against the frozen reviewed projection");
 			if (flags.includes("m")) {
 				index += 1;
 				if (arguments_[index] === undefined) throw new Error("Commit message option is missing its value");
@@ -3508,19 +3511,8 @@ function commitIncludesAllTracked(arguments_: readonly string[]): boolean {
 }
 
 function deriveCommitTree(command: ReviewLifecycleCommand): string {
-	const includesAllTracked = commitIncludesAllTracked(command.arguments);
-	if (!includesAllTracked) return runReviewGit(command.cwd, ["write-tree"]);
-	const temporaryDirectory = mkdtempSync(join(tmpdir(), "gentle-pi-commit-tree-"));
-	const temporaryIndex = join(temporaryDirectory, "index");
-	try {
-		const environment = { ...process.env, GIT_INDEX_FILE: temporaryIndex };
-		const stagedTree = runReviewGit(command.cwd, ["write-tree"]);
-		runReviewGit(command.cwd, ["read-tree", stagedTree], environment);
-		runReviewGit(command.cwd, ["add", "-u", "--", "."], environment);
-		return runReviewGit(command.cwd, ["write-tree"], environment);
-	} finally {
-		rmSync(temporaryDirectory, { recursive: true, force: true });
-	}
+	commitIncludesAllTracked(command.arguments);
+	return runReviewGit(command.cwd, ["write-tree"]);
 }
 
 function resolveLocalFullRef(cwd: string, value: string, label: string): string {
@@ -3847,14 +3839,92 @@ function isKnownPiLegacyLineage(cwd: string, lineageId: string): boolean {
 	}
 }
 
-function hasLegacyReviewAuthority(cwd: string): boolean {
+const COMPACT_NATIVE_START_APPLICABILITY = {
+	UNRELATED_HISTORY: "unrelated-history",
+	COMPATIBLE_RECEIPT: "compatible-receipt",
+	NONTERMINAL: "nonterminal",
+	ESCALATED: "escalated",
+	AMBIGUOUS: "ambiguous",
+	INVALID: "invalid",
+} as const;
+
+type CompactNativeStartApplicability =
+	(typeof COMPACT_NATIVE_START_APPLICABILITY)[keyof typeof COMPACT_NATIVE_START_APPLICABILITY];
+
+interface CompactNativeStartClassification {
+	applicability: CompactNativeStartApplicability;
+	lineageIds: string[];
+}
+
+function isBrokenRepositoryIdentity(error: unknown): error is ReviewRepositoryError {
+	return error instanceof ReviewRepositoryError && /pinned repository identity|root commit authority/i.test(error.message);
+}
+
+function classifyCompactAuthorityApplicability(cwd: string): CompactNativeStartClassification {
 	try {
-		const inspection = inspectReviewAuthorityForController(cwd);
-		return inspection.outcome !== "clean" || inspection.compact_authority !== undefined;
-	} catch (error) {
-		if (error instanceof ReviewRepositoryError) return false;
-		throw error;
+		const authority = resolveRepositoryAuthorityV1(cwd);
+		const live = captureLiveReviewCandidateBinding({ cwd, repositoryId: authority.repository_id });
+		const matching = discoverCompactReviewStores(cwd).flatMap((store) => {
+			const record = store.load();
+			const state = record.state;
+			const stateMatches = state.initial_snapshot.base_tree === live.base_tree &&
+				state.initial_snapshot.complete_snapshot_tree === live.complete_snapshot_tree &&
+				state.initial_snapshot.initial_review_tree === live.initial_review_tree &&
+				canonicalJsonV1(state.genesis_paths) === canonicalJsonV1(live.genesis_paths) &&
+				canonicalJsonV1(state.intended_untracked) === canonicalJsonV1(live.intended_untracked);
+			if (state.state !== "approved" && state.state !== "escalated") {
+				return stateMatches ? [{ lineageId: state.lineage_id, state: state.state }] : [];
+			}
+			const { body } = store.loadTerminalReceipt().receipt;
+			const receiptMatches = body.base_tree === live.base_tree &&
+				body.final_candidate_tree === live.complete_snapshot_tree &&
+				body.genesis_paths_hash === domainHashV1("compact-paths", live.genesis_paths) &&
+				body.intended_untracked_hash === domainHashV1("compact-untracked", live.intended_untracked);
+			if (stateMatches && !receiptMatches) throw new CompactReviewStoreError("Compact terminal receipt is incomplete or mismatched for its candidate");
+			return receiptMatches ? [{ lineageId: state.lineage_id, state: state.state }] : [];
+		}).toSorted((left, right) => left.lineageId.localeCompare(right.lineageId));
+		if (matching.length === 0) return { applicability: COMPACT_NATIVE_START_APPLICABILITY.UNRELATED_HISTORY, lineageIds: [] };
+		if (matching.length > 1) return { applicability: COMPACT_NATIVE_START_APPLICABILITY.AMBIGUOUS, lineageIds: matching.map(({ lineageId }) => lineageId) };
+		const match = matching[0]!;
+		return {
+			applicability: match.state === "approved"
+				? COMPACT_NATIVE_START_APPLICABILITY.COMPATIBLE_RECEIPT
+				: match.state === "escalated"
+					? COMPACT_NATIVE_START_APPLICABILITY.ESCALATED
+					: COMPACT_NATIVE_START_APPLICABILITY.NONTERMINAL,
+			lineageIds: [match.lineageId],
+		};
+	} catch {
+		return { applicability: COMPACT_NATIVE_START_APPLICABILITY.INVALID, lineageIds: [] };
 	}
+}
+
+function compactApplicabilityNextAction(applicability: CompactNativeStartClassification): string {
+	switch (applicability.applicability) {
+		case COMPACT_NATIVE_START_APPLICABILITY.COMPATIBLE_RECEIPT:
+			return "use-compatible-read-or-gate-route";
+		case COMPACT_NATIVE_START_APPLICABILITY.NONTERMINAL:
+			return "stop-and-resolve-existing-compact-authority";
+		case COMPACT_NATIVE_START_APPLICABILITY.ESCALATED:
+			return "stop-and-report-escalated-compact-authority";
+		case COMPACT_NATIVE_START_APPLICABILITY.AMBIGUOUS:
+			return "stop-and-report-ambiguous-compact-authority";
+		case COMPACT_NATIVE_START_APPLICABILITY.INVALID:
+			return "stop-and-report-invalid-compact-authority";
+		case COMPACT_NATIVE_START_APPLICABILITY.UNRELATED_HISTORY:
+			return "start-native-authoritative";
+	}
+}
+
+function compactNativeStartBlockedResult(applicability: CompactNativeStartClassification): Record<string, unknown> {
+	return {
+		operation: REVIEW_CONTROLLER_OPERATION.START,
+		status: "blocked",
+		outcome: `compact-authority-${applicability.applicability}`,
+		mutation_performed: false,
+		next_action: compactApplicabilityNextAction(applicability),
+		...(applicability.lineageIds.length === 0 ? {} : { lineage_ids: applicability.lineageIds }),
+	};
 }
 
 function nativeStatusUnsupported(operation: ReviewControllerOperation): Record<string, unknown> {
@@ -3866,7 +3936,7 @@ function nativeStatusUnsupported(operation: ReviewControllerOperation): Record<s
 		inventory_complete: false,
 		next_action: "require-upstream-read-only-native-status-inventory",
 		evidence: {
-			native_contract: "gentle-ai/2.1.2",
+			native_contract: "gentle-ai/2.1.4",
 			general_status: "unsupported",
 			claimant_inventory: "unsupported",
 		},
@@ -3882,6 +3952,8 @@ function mapNativeStartResult(result: NativeStartResult): Record<string, unknown
 		changed_files: result.changedFiles,
 		original_changed_lines: result.changedLines,
 		correction_budget: result.correctionBudget,
+		action: result.action,
+		lenses_required: result.lensesRequired,
 	};
 }
 
@@ -3921,6 +3993,19 @@ function requestedNativeGate(command: ReviewLifecycleCommand): string {
 
 function nativeGateFlags(derived: DerivedReviewGateTarget): readonly string[] {
 	return derived.nativePublication?.flags ?? [];
+}
+
+function assertFrozenPreCommitProjection(
+	derived: DerivedReviewGateTarget,
+	lineageId: string,
+	candidateViews: CandidateViewRegistry | null,
+): string | undefined {
+	if (derived.command.event !== "pre-commit" || candidateViews === null || !candidateViews.hasProjection(lineageId)) return undefined;
+	const projection = candidateViews.resolveProjection(lineageId, derived.command.cwd);
+	if (derived.actualIntendedCommitTree !== projection.candidateTree) {
+		throw new CandidateViewError("staged commit tree does not exactly match the frozen reviewed candidate projection");
+	}
+	return projection.candidateTree;
 }
 
 function authorizationTargetHash(derived: DerivedReviewGateTarget): string {
@@ -4101,6 +4186,7 @@ async function executeReviewControllerOperation(
 	signal?: AbortSignal,
 	publicationProbe: PublicationProbe = nodePublicationProbe,
 	publicationProbeTimeoutMs = PUBLICATION_PROBE_TIMEOUT_MS,
+	candidateViews: CandidateViewRegistry | null = new CandidateViewRegistry(),
 ): Promise<Record<string, unknown>> {
 	const parameters = parseReviewControllerParameters(parametersValue);
 	if (parameters.operation === REVIEW_CONTROLLER_OPERATION.EXPORT) {
@@ -4155,7 +4241,39 @@ async function executeReviewControllerOperation(
 		return { operation: parameters.operation, change_name: input.changeName, recovery_id: installed.recovery_id, active_authority_id: active.record.state.lineage_id, next_action: "validate-recovered-authority" };
 	}
 	if (parameters.operation === REVIEW_CONTROLLER_OPERATION.INSPECT && nativeReviewCli !== null) {
-		return nativeStatusUnsupported(parameters.operation);
+		try {
+			const inspection = inspectReviewAuthorityForController(defaultCwd);
+			if (inspection.outcome !== "clean") return { operation: parameters.operation, status: "blocked", inspection, inventory_complete: false, next_action: "resolve-pi-owned-preflight" };
+			const compact = classifyCompactAuthorityApplicability(defaultCwd);
+			const diagnostic = {
+				compact_authority_applicability: compact.applicability,
+				...(compact.lineageIds.length === 0 ? {} : { compact_authority_lineage_ids: compact.lineageIds }),
+			};
+			if (compact.applicability === COMPACT_NATIVE_START_APPLICABILITY.UNRELATED_HISTORY) {
+				return { operation: parameters.operation, status: "ready", inspection, ...diagnostic, inventory_complete: false, next_action: compactApplicabilityNextAction(compact), evidence: { native_contract: "gentle-ai/2.1.4", general_status: "unsupported", claimant_inventory: "unsupported", start_routing: "authoritative" } };
+			}
+			return {
+				operation: parameters.operation,
+				inspection,
+				...diagnostic,
+				inventory_complete: false,
+				status: compact.applicability === COMPACT_NATIVE_START_APPLICABILITY.NONTERMINAL ? "in-progress" : "blocked",
+				next_action: compactApplicabilityNextAction(compact),
+			};
+		} catch (error) {
+			if (isBrokenRepositoryIdentity(error)) {
+				return {
+					operation: parameters.operation,
+					status: "blocked",
+					outcome: "compact-authority-invalid",
+					compact_authority_applicability: COMPACT_NATIVE_START_APPLICABILITY.INVALID,
+					inventory_complete: false,
+					next_action: "stop-and-report-invalid-compact-authority",
+				};
+			}
+			if (error instanceof ReviewRepositoryError) return nativeStatusUnsupported(parameters.operation);
+			throw error;
+		}
 	}
 	if (parameters.operation === REVIEW_CONTROLLER_OPERATION.INSPECT) {
 		const authority = resolveRepositoryAuthorityV1(defaultCwd);
@@ -4307,10 +4425,26 @@ async function executeReviewControllerOperation(
 			REVIEW_CONTROLLER_OPERATION.START,
 		);
 		if (rawStart.mode === REVIEW_MODE.ORDINARY && nativeReviewCli !== null) {
-			if (
-				hasLegacyReviewAuthority(defaultCwd) ||
-				(typeof parameters.lineageId === "string" && isKnownPiLegacyLineage(defaultCwd, parameters.lineageId))
-			) {
+			const selectorFree = !("policyPath" in rawStart) && !("baseRef" in rawStart);
+			if (selectorFree) {
+				let compact: CompactNativeStartClassification | undefined;
+				try {
+					const inspection = inspectReviewAuthorityForController(defaultCwd);
+					if (inspection.outcome !== "clean") {
+						return { operation: parameters.operation, status: "blocked", outcome: "legacy-read-only", mutation_performed: false, next_action: "use-compatible-read-or-gate-route" };
+					}
+					compact = classifyCompactAuthorityApplicability(defaultCwd);
+				} catch (error) {
+					if (isBrokenRepositoryIdentity(error)) {
+						return compactNativeStartBlockedResult({ applicability: COMPACT_NATIVE_START_APPLICABILITY.INVALID, lineageIds: [] });
+					}
+					if (!(error instanceof ReviewRepositoryError)) throw error;
+				}
+				if (compact !== undefined && compact.applicability !== COMPACT_NATIVE_START_APPLICABILITY.UNRELATED_HISTORY) {
+					return compactNativeStartBlockedResult(compact);
+				}
+			}
+			if (typeof parameters.lineageId === "string" && isKnownPiLegacyLineage(defaultCwd, parameters.lineageId)) {
 				return { operation: parameters.operation, status: "blocked", outcome: "legacy-read-only", mutation_performed: false, next_action: "use-compatible-read-or-gate-route" };
 			}
 			if ("policyHash" in rawStart) return nativeStartRejection("legacy-policy-hash-unsupported");
@@ -4322,16 +4456,24 @@ async function executeReviewControllerOperation(
 			if (policy.reason !== undefined) return nativeStartRejection(policy.reason);
 			const baseRef = rawStart.baseRef;
 			if (baseRef !== undefined && !isCanonicalProcessString(baseRef)) return nativeStartRejection("base-ref-invalid");
+			const replayKey = JSON.stringify({ cwd: defaultCwd, lineageId: parameters.lineageId ?? null, input: parameters.input ?? null, inputPath: parameters.inputPath ?? null });
+			let candidateView: ReturnType<CandidateViewRegistry["create"]> | undefined;
 			try {
+				candidateView = candidateViews?.createOrReuse({ contributorRoot: defaultCwd, replayKey });
 				const result = await nativeReviewCli.start({
-					cwd: defaultCwd,
+					cwd: candidateView?.root ?? defaultCwd,
 					...(baseRef === undefined ? {} : { baseRef }),
 					...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
 					...(policy.policyPath === undefined ? {} : { policyPath: policy.policyPath }),
 					...(signal === undefined ? {} : { signal }),
 				});
+				if (candidateView && candidateViews && result.lensesRequired) candidateViews.bind({ token: candidateView.token, lineageId: result.lineageId, selectedLenses: result.selectedLenses });
+				else if (candidateView && candidateViews && ((result.action === "created" && result.state === "reviewing") || result.action === "resumed" || result.action === "reuse-receipt")) candidateViews.retain(candidateView.token, result.lineageId);
+				else if (candidateView && candidateViews) candidateViews.cleanup(candidateView.token);
 				return { operation: parameters.operation, result: mapNativeStartResult(result) };
 			} catch (error) {
+				const value = error as { mutationOutcome?: unknown; nextAction?: unknown };
+				if (candidateView && candidateViews && value.mutationOutcome !== "unknown" && value.nextAction !== "replay-exact-native-operation") candidateViews.cleanup(candidateView.token);
 				return nativeOperationFailure(parameters.operation, error);
 			}
 		}
@@ -4464,9 +4606,15 @@ async function executeReviewControllerOperation(
 				...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
 				...raw,
 			});
+			let correctionCompletion = false;
+			let candidateView: ReturnType<CandidateViewRegistry["create"]> | undefined;
 			try {
+				if (candidateViews && parameters.lineageId === undefined) throw new CandidateViewError("Native FINALIZE requires an explicit candidate-view lineage");
+				correctionCompletion = input.review_result === undefined && (input.validation !== undefined || input.validation_proof !== undefined) && input.final_evidence !== undefined;
+				const replayKey = JSON.stringify({ cwd: defaultCwd, lineageId: parameters.lineageId ?? null, input: parameters.input ?? null, inputPath: parameters.inputPath ?? null });
+				candidateView = candidateViews && parameters.lineageId ? correctionCompletion ? candidateViews.createCorrected(parameters.lineageId, defaultCwd, replayKey) : candidateViews.resolveForFinalize(parameters.lineageId) : undefined;
 				const result = await nativeReviewCli.finalize({
-					cwd: defaultCwd,
+					cwd: candidateView?.root ?? defaultCwd,
 					...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
 					...(input.review_result === undefined ? {} : { lensResults: input.review_result.lens_results.map((document, index) => ({ lens: document.lens ?? `lens-${index}`, document: toNativeReviewerDocument(document) })) }),
 					...(input.refuter_batch === undefined ? {} : { refuterDocument: toNativeRefuterDocument(input.refuter_batch) }),
@@ -4475,8 +4623,14 @@ async function executeReviewControllerOperation(
 					...(input.final_evidence === undefined ? {} : { evidenceDocument: input.final_evidence, failed: input.final_verification_passed === false }),
 					...(signal === undefined ? {} : { signal }),
 				});
+				try {
+					if (correctionCompletion && candidateViews && parameters.lineageId) candidateViews.promoteCorrected(parameters.lineageId, candidateView!.token);
+					candidateViews?.cleanupTerminal(result.lineageId, result.state);
+				} catch {}
 				return { operation: parameters.operation, result: mapNativeFinalizeResult(result) };
 			} catch (error) {
+				const value = error as { mutationOutcome?: unknown; nextAction?: unknown };
+				if (correctionCompletion && candidateView && candidateViews && value.mutationOutcome !== "unknown" && value.nextAction !== "replay-exact-native-operation") candidateViews.cleanup(candidateView.token);
 				return nativeOperationFailure(parameters.operation, error);
 			}
 		}
@@ -4600,6 +4754,7 @@ async function executeReviewControllerOperation(
 				publicationProbeTimeoutMs,
 				signal,
 			);
+			const intendedTree = assertFrozenPreCommitProjection(nativeDerived, parameters.lineageId, candidateViews);
 			const result = await nativeReviewCli.validate({
 				cwd: nativeDerived.command.cwd,
 				gate: requestedNativeGate(nativeDerived.command),
@@ -4618,6 +4773,7 @@ async function executeReviewControllerOperation(
 					signal,
 				)
 				: nativeDerived;
+			if (result.allowed && result.result === "allow") assertFrozenPreCommitProjection(authorizedDerived, parameters.lineageId, candidateViews);
 			const response: Record<string, unknown> = {
 				operation: parameters.operation,
 				result: mapNativeValidateResult(result),
@@ -4633,6 +4789,7 @@ async function executeReviewControllerOperation(
 						lineage_id: result.gateContext.lineageId,
 						store_revision: result.gateContext.storeRevision,
 						fingerprint: nativeGateFingerprint(result, authorizedDerived),
+						...(intendedTree === undefined ? {} : { intended_tree: intendedTree }),
 					},
 				};
 				pendingAuthorizations.set(commandHash, authorization);
@@ -4795,6 +4952,7 @@ async function gateLifecycleCommand(
 	publicationProbe: PublicationProbe = nodePublicationProbe,
 	publicationProbeTimeoutMs = PUBLICATION_PROBE_TIMEOUT_MS,
 	signal?: AbortSignal,
+	candidateViews: CandidateViewRegistry | null = null,
 ): Promise<ToolCallEventResult | undefined> {
 	const inspection = inspectReviewLifecycleCommand(command, defaultCwd);
 	if (!inspection.event) return undefined;
@@ -4833,6 +4991,22 @@ async function gateLifecycleCommand(
 				reason: `Gentle AI ${inspection.event} gate native publication target changed after authorization and failed closed: ${error instanceof Error ? error.message : String(error)}`,
 			};
 		}
+	}
+	try {
+		const intendedTree = authorization.native_gate === undefined
+			? undefined
+			: assertFrozenPreCommitProjection(derived, authorization.native_gate.lineage_id, candidateViews);
+		if (authorization.native_gate?.intended_tree !== undefined && intendedTree !== authorization.native_gate.intended_tree) {
+			return {
+				block: true,
+				reason: `Gentle AI ${inspection.event} gate staged projection changed after authorization and failed closed.`,
+			};
+		}
+	} catch (error) {
+		return {
+			block: true,
+			reason: `Gentle AI ${inspection.event} gate could not re-prove the staged projection and failed closed: ${error instanceof Error ? error.message : String(error)}`,
+		};
 	}
 	if (
 		authorization.command_hash !== commandHash ||
@@ -4877,6 +5051,8 @@ async function gateLifecycleCommand(
 				publicationProbeTimeoutMs,
 				signal,
 			);
+			const postNativeIntendedTree = assertFrozenPreCommitProjection(postNativeDerived, authorization.native_gate.lineage_id, candidateViews);
+			if (authorization.native_gate.intended_tree !== undefined && postNativeIntendedTree !== authorization.native_gate.intended_tree) throw new CandidateViewError("staged projection changed during native validation");
 			assertNativePublicationBinding(fresh, postNativeDerived);
 			if (nativeGateFingerprint(fresh, postNativeDerived) !== authorization.native_gate.fingerprint) {
 				return {
@@ -5020,6 +5196,7 @@ function hasRecoveryObligationForChange(cwd: string, changeName: string): boolea
 
 export interface GentleAiRuntimeDependencies {
 	nativeReviewCli?: NativeReviewCli | null;
+	candidateViews?: CandidateViewRegistry | null;
 	publicationProbe?: PublicationProbe;
 	publicationProbeTimeoutMs?: number;
 	bashTimeRevalidationTimeoutMs?: number;
@@ -5034,17 +5211,18 @@ export function createGentleAiExtension(dependencies: GentleAiRuntimeDependencie
 	if (!Number.isSafeInteger(bashTimeRevalidationTimeoutMs) || bashTimeRevalidationTimeoutMs <= 0) throw new TypeError("Bash-time revalidation timeout must be a positive safe integer");
 	return function gentleAi(pi: ExtensionAPI): void {
 	const pendingReviewAuthorizations = new Map<string, PendingReviewAuthorization>();
+	const candidateViews = dependencies.candidateViews === undefined ? new CandidateViewRegistry() : dependencies.candidateViews;
 
 	pi.registerTool({
 		name: "gentle_review",
 		label: "Gentle Review Controller",
 		description:
-			"Inspect and recover review authority, run new native ordinary review through start/finalize/validate, preserve legacy compact compatibility reads and graph-v1 Judgment Day, and authorize one exact lifecycle command. RESET/RECOVER remain destructive; prepare-supersession/supersede require fresh interactive authorization and fail closed headlessly.",
+			"Inspect and recover review authority, run new native ordinary review through start/finalize/validate, preserve legacy compact compatibility reads and graph-v1 Judgment Day, and authorize one exact lifecycle command. FINALIZE input is a JSON string: review_result.lens_results[] entries contain lens, findings, and non-empty evidence exactly once for every lens selected by START; final_evidence and final_verification_passed are paired. This is the Pi wrapper contract, distinct from native CLI --result, --refuter, --validation, and --evidence files. RESET/RECOVER remain destructive; prepare-supersession/supersede require fresh interactive authorization and fail closed headlessly.",
 		promptSnippet: "Inspect authority, then use native start/finalize/validate for a new ordinary review; use graph-v1 only for explicit Judgment Day",
 		promptGuidelines: [
 			'Call {"operation":"inspect"} before START. New native ordinary START uses a JSON string such as "{\\"mode\\":\\"ordinary\\"}", with optional baseRef or repository-local policyPath; policyHash is legacy compact-only. The controller derives lineage, Git/untracked scope, tier, lenses, authored lines, and budget.',
 			"For non-destructive legacy recovery, call prepare-supersession with one exact change, source, successor, operation, and prepared evidence input. Call supersede only with the returned request hash and exact English challenge after fresh UI approval; it never falls back to RESET or RECOVER. Headless, stale, conflicting, malformed, or unsupported recovery remains resolve-review blocked; exact retries are idempotent, but semantic retries require a new operation.",
-			"Run selected lenses once, then call FINALIZE with causal result JSON. FINALIZE alone records correction forecast, Git-derived correction evidence, targeted validation, and final evidence. Use ADVANCE only for explicit graph-v1 Judgment Day.",
+			"Run selected lenses once, then call FINALIZE with a JSON string containing review_result.lens_results entries for every START-selected lens. Each entry has lens, findings, and non-empty evidence; clean lenses use findings: []. Pair final_evidence with final_verification_passed. This Pi wrapper shape differs from native CLI --result, --refuter, --validation, and --evidence files. FINALIZE alone records correction forecast, Git-derived correction evidence, targeted validation, and final evidence. Use ADVANCE only for explicit graph-v1 Judgment Day.",
 			"For blocked-legacy or blocked-mixed, do not call START repeatedly. Explain invalidation, request explicit user authorization for the exact reset_request challenge, then call RESET or RECOVER only after authorization. RESET and RECOVER internally INSPECT authority; require their verified clean result and next_action start-fresh-ordinary-review-after-verified-clean before continuing directly to a fresh ordinary START.",
 			"A reported lineage_created false or pre-authority validation error proves no lineage was created. After ambiguous START or FINALIZE output, replay the exact operation so compact CAS returns the committed revision or rejects a stale/semantic retry.",
 			"Use gentle_review for bounded review transaction operations and exact lifecycle validation; never fabricate bash tool metadata or a separate gate target.",
@@ -5062,6 +5240,7 @@ export function createGentleAiExtension(dependencies: GentleAiRuntimeDependencie
 				signal,
 				publicationProbe,
 				publicationProbeTimeoutMs,
+				candidateViews,
 			);
 			return {
 				content: [{ type: "text", text: JSON.stringify(details) }],
@@ -5151,6 +5330,17 @@ export function createGentleAiExtension(dependencies: GentleAiRuntimeDependencie
 			event.input,
 		);
 		if (sensitivePathDenied) return sensitivePathDenied;
+		if (event.toolName === "subagent_run") {
+			try {
+				injectReviewCandidateView(event.input, candidateViews);
+				return undefined;
+			} catch (error) {
+				return {
+					block: true,
+					reason: error instanceof Error ? error.message : "review subagent dispatch is invalid",
+				};
+			}
+		}
 		if (event.toolName !== "bash") return undefined;
 		if (!isRecord(event.input) || typeof event.input.command !== "string")
 			return undefined;
@@ -5159,7 +5349,7 @@ export function createGentleAiExtension(dependencies: GentleAiRuntimeDependencie
 			(command) => {
 				const deadline = AbortSignal.timeout(bashTimeRevalidationTimeoutMs);
 				const signal = ctx.signal === undefined ? deadline : AbortSignal.any([ctx.signal, deadline]);
-				return gateLifecycleCommand(command, ctx.cwd, pendingReviewAuthorizations, nativeReviewCli, publicationProbe, publicationProbeTimeoutMs, signal);
+				return gateLifecycleCommand(command, ctx.cwd, pendingReviewAuthorizations, nativeReviewCli, publicationProbe, publicationProbeTimeoutMs, signal, candidateViews);
 			},
 			(command) => confirmCommand(command, ctx),
 		);

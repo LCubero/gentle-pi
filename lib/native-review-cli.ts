@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
+import { PackageLocalGentleAiBinaryMissingError, resolveGentleAiBinary } from "./gentle-ai-binary.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -29,6 +30,7 @@ export const NATIVE_REVIEW_ERROR_CODE = {
 	IDENTITY_MISMATCH: "identity-mismatch",
 	VERSION_INCOMPATIBLE: "version-incompatible",
 	CANCELLED: "cancelled",
+	PACKAGE_BINARY_MISSING: "package-local-binary-missing",
 } as const;
 export type NativeReviewErrorCode = (typeof NATIVE_REVIEW_ERROR_CODE)[keyof typeof NATIVE_REVIEW_ERROR_CODE];
 
@@ -94,7 +96,9 @@ export interface NativeValidateRequest { cwd: string; gate: string; lineageId?: 
 export interface NativeBindSddRequest { cwd: string; change: string; lineage: string; expectedBindingRevision: string; signal?: AbortSignal; }
 export interface NativeSddStatusRequest { cwd: string; change: string; signal?: AbortSignal; }
 export interface NativeGateContext { lineageId: string; storeRevision: string; raw: Record<string, unknown>; }
-export interface NativeStartResult { lineageId: string; state: "reviewing"; riskLevel: string; selectedLenses: readonly string[]; changedFiles: number; changedLines: number; correctionBudget: number; }
+export const NATIVE_START_ACTION = { CREATED: "created", RESUMED: "resumed", REUSE_RECEIPT: "reuse-receipt", BLOCKED_SCOPE_ACTION: "blocked-scope-action" } as const;
+export type NativeStartAction = (typeof NATIVE_START_ACTION)[keyof typeof NATIVE_START_ACTION];
+export interface NativeStartResult { lineageId: string; state: "reviewing" | "correction_required" | "validating" | "approved" | "escalated"; riskLevel: string; selectedLenses: readonly string[]; changedFiles: number; changedLines: number; correctionBudget: number; action: NativeStartAction; lensesRequired: boolean; }
 export interface NativeValidateResult { allowed: boolean; result: "allow" | "scope-changed" | "invalidated" | "escalated"; action: string; reason: string; gateContext: NativeGateContext; }
 export interface NativeFinalizeResult { lineageId: string; state: string; action: string; storeRevision: string; receiptPath?: string; }
 export interface NativeBindSddResult {
@@ -120,13 +124,14 @@ export function isCanonicalProcessString(value: unknown): value is string {
 const NATIVE_RISK_LEVEL = ["low", "medium", "high"] as const;
 const NATIVE_REVIEW_LENS = ["review-risk", "review-resilience", "review-readability", "review-reliability"] as const;
 const NATIVE_FINALIZE_STATE = ["reviewing", "correction_required", "validating", "approved", "escalated"] as const;
+const NATIVE_START_ACTION_VALUES = Object.values(NATIVE_START_ACTION);
 const NATIVE_GATE_RESULT = ["allow", "scope-changed", "invalidated", "escalated"] as const;
 const NATIVE_GATE = ["post-apply", "pre-commit", "pre-push", "pre-pr", "release"] as const;
 const NATIVE_SDD_NEXT_ACTION = ["apply", "verify", "remediate", "archive", "review", "resolve-review", "resolve-blockers", "sdd-new", "select-change", "propose", "spec", "design", "tasks"] as const;
 const NATIVE_SDD_POST_REVIEW_ACTION = ["verify", "archive"] as const;
 
 export const NATIVE_CLI_CONTRACTS = Object.freeze({
-	"2.1.2": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: false, inventory: false }),
+	"2.1.4": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: false, inventory: false }),
 });
 
 export class NativeReviewCliError extends Error {
@@ -298,6 +303,22 @@ function decodeReviewTransaction(value: unknown): void {
 	}
 	for (const field of ["original_changed_lines", "correction_budget", "proposed_correction_lines", "actual_correction_lines"]) if (transaction[field] !== undefined) nonNegativeInteger(transaction[field]);
 }
+function hasCanonicalSelectedLenses(riskLevel: string, selectedLenses: readonly string[]): boolean {
+	if (new Set(selectedLenses).size !== selectedLenses.length) return false;
+	if (riskLevel === "low") return selectedLenses.length === 0;
+	if (riskLevel === "medium") return selectedLenses.length === 1;
+	return selectedLenses.length === NATIVE_REVIEW_LENS.length
+		&& NATIVE_REVIEW_LENS.every((lens) => selectedLenses.includes(lens));
+}
+
+function hasValidLensesRequired(action: NativeStartAction, state: string, riskLevel: string, lensesRequired: boolean): boolean {
+	if (riskLevel === "low") return !lensesRequired;
+	if (action === NATIVE_START_ACTION.CREATED) return state === "reviewing" && lensesRequired;
+	if (action === NATIVE_START_ACTION.RESUMED) return !lensesRequired;
+	if (action === NATIVE_START_ACTION.REUSE_RECEIPT) return state === "approved" && !lensesRequired;
+	return !lensesRequired;
+}
+
 function nativeError(code: NativeReviewErrorCode, operation: NativeReviewOperation, mutating: boolean, message: string): NativeReviewCliError {
 	return new NativeReviewCliError(code, operation, true, mutating, message);
 }
@@ -307,13 +328,14 @@ interface NativeJsonExecution {
 	exitCode: number;
 }
 
-export class NativeReviewCliV212 {
+export class NativeReviewCliV214 {
 	private readonly adapter: ExecFileAdapter;
-	private readonly executable: string;
+	private readonly executable: string | (() => string);
 	private readonly timeoutMs: number;
 	private readonly maxBufferBytes: number;
 	private readonly cleanupDirectory: (directory: string) => Promise<void>;
-	constructor(adapter: ExecFileAdapter, executable = "gentle-ai", timeoutMs = 30_000, maxBufferBytes = 1024 * 1024, cleanupDirectory = (directory: string) => rm(directory, { recursive: true, force: true })) {
+	constructor(adapter: ExecFileAdapter, executable: string | (() => string) = resolveGentleAiBinary, timeoutMs = 30_000, maxBufferBytes = 1024 * 1024, cleanupDirectory = (directory: string) => rm(directory, { recursive: true, force: true })) {
+		if (typeof executable === "string" && (!isAbsolute(executable) || executable === "gentle-ai")) throw new TypeError("Native review requires an absolute package-local executable");
 		this.adapter = adapter;
 		this.executable = executable;
 		this.timeoutMs = timeoutMs;
@@ -321,9 +343,23 @@ export class NativeReviewCliV212 {
 		this.cleanupDirectory = cleanupDirectory;
 	}
 
+	private executablePath(operation: NativeReviewOperation, mutating: boolean): string {
+		try {
+			const executable = typeof this.executable === "string" ? this.executable : this.executable();
+			if (!isAbsolute(executable) || executable === "gentle-ai") throw new TypeError("Native review requires an absolute package-local executable");
+			return executable;
+		}
+		catch (error) {
+			if (error instanceof PackageLocalGentleAiBinaryMissingError) {
+				throw nativeError(NATIVE_REVIEW_ERROR_CODE.PACKAGE_BINARY_MISSING, operation, mutating, error.message);
+			}
+			throw nativeError(NATIVE_REVIEW_ERROR_CODE.UNAVAILABLE, operation, mutating, "package-local native process could not start");
+		}
+	}
+
 	private async execute(operation: NativeReviewOperation, cwd: string, arguments_: readonly string[], mutating: boolean, signal?: AbortSignal): Promise<NativeJsonExecution> {
 		let result: ExecFileResult;
-		try { result = await this.adapter({ file: this.executable, arguments: arguments_, cwd, timeoutMs: this.timeoutMs, maxBufferBytes: this.maxBufferBytes, signal }); }
+		try { result = await this.adapter({ file: this.executablePath(operation, mutating), arguments: arguments_, cwd, timeoutMs: this.timeoutMs, maxBufferBytes: this.maxBufferBytes, signal }); }
 		catch (error) {
 			if (error instanceof NativeReviewCliError) throw nativeError(error.code, operation, mutating, error.message);
 			if (error instanceof Error && error.name === "AbortError") throw nativeError(NATIVE_REVIEW_ERROR_CODE.CANCELLED, operation, mutating, "native process was cancelled");
@@ -340,8 +376,9 @@ export class NativeReviewCliV212 {
 
 	private async verifyVersion(cwd: string, signal?: AbortSignal): Promise<void> {
 		let result: ExecFileResult;
-		try { result = await this.adapter({ file: this.executable, arguments: ["version"], cwd, timeoutMs: this.timeoutMs, maxBufferBytes: this.maxBufferBytes, signal }); }
+		try { result = await this.adapter({ file: this.executablePath(NATIVE_REVIEW_OPERATION.VERSION, false), arguments: ["version"], cwd, timeoutMs: this.timeoutMs, maxBufferBytes: this.maxBufferBytes, signal }); }
 		catch (error) {
+			if (error instanceof NativeReviewCliError) throw error;
 			if (error instanceof Error && error.name === "AbortError") throw nativeError(NATIVE_REVIEW_ERROR_CODE.CANCELLED, NATIVE_REVIEW_OPERATION.VERSION, false, "version process was cancelled");
 			throw nativeError(NATIVE_REVIEW_ERROR_CODE.UNAVAILABLE, NATIVE_REVIEW_OPERATION.VERSION, false, "gentle-ai is unavailable");
 		}
@@ -349,7 +386,7 @@ export class NativeReviewCliV212 {
 		if (result.outputLimitExceeded) throw nativeError(NATIVE_REVIEW_ERROR_CODE.OUTPUT_LIMIT, NATIVE_REVIEW_OPERATION.VERSION, false, "version process output exceeded limit");
 		if (result.signal) throw nativeError(NATIVE_REVIEW_ERROR_CODE.SIGNAL, NATIVE_REVIEW_OPERATION.VERSION, false, "version process was signalled");
 		if (result.exitCode !== 0) throw nativeError(NATIVE_REVIEW_ERROR_CODE.NON_ZERO, NATIVE_REVIEW_OPERATION.VERSION, false, "version process failed");
-		if (result.stderr.trim().length > 0 || result.stdout.replace(/\r\n$/, "\n") !== "gentle-ai 2.1.2\n") throw nativeError(NATIVE_REVIEW_ERROR_CODE.VERSION_INCOMPATIBLE, NATIVE_REVIEW_OPERATION.VERSION, false, "gentle-ai 2.1.2 is required");
+		if (result.stderr.trim().length > 0 || result.stdout.replace(/\r\n$/, "\n") !== "gentle-ai 2.1.4\n") throw nativeError(NATIVE_REVIEW_ERROR_CODE.VERSION_INCOMPATIBLE, NATIVE_REVIEW_OPERATION.VERSION, false, "gentle-ai 2.1.4 is required");
 	}
 
 	async start(request: NativeStartRequest): Promise<NativeStartResult> {
@@ -357,14 +394,21 @@ export class NativeReviewCliV212 {
 		await this.verifyVersion(request.cwd, request.signal);
 		const { body: result } = await this.execute(NATIVE_REVIEW_OPERATION.START, request.cwd, ["review", "start", "--cwd", request.cwd, ...(request.baseRef === undefined ? [] : ["--base-ref", request.baseRef]), ...(request.lineageId ? ["--lineage", request.lineageId] : []), ...(request.policyPath ? ["--policy", request.policyPath] : []), ...(request.focus ? ["--focus", request.focus] : [])], true, request.signal);
 		return decode(NATIVE_REVIEW_OPERATION.START, true, () => {
-			const body = exactObject(result, ["operation", "lineage_id", "state", "risk_level", "selected_lenses", "changed_files", "changed_lines", "correction_budget"]);
-			if (body.operation !== "review/start" || body.state !== "reviewing") throw new Error("wrong start discriminator");
+			const body = exactObject(result, ["operation", "lineage_id", "state", "risk_level", "selected_lenses", "changed_files", "changed_lines", "correction_budget", "action", "lenses_required", "projection"]);
+			if (body.operation !== "review/start" || body.projection !== "workspace" || !(NATIVE_FINALIZE_STATE as readonly string[]).includes(stringValue(body.state))) throw new Error("wrong start discriminator");
 			const lineageId = requiredString(body.lineage_id);
 			if (request.lineageId && lineageId !== request.lineageId) throw nativeError(NATIVE_REVIEW_ERROR_CODE.IDENTITY_MISMATCH, NATIVE_REVIEW_OPERATION.START, true, "native start lineage mismatch");
 			const riskLevel = requiredString(body.risk_level);
 			const selectedLenses = stringArray(body.selected_lenses);
-			if (!(NATIVE_RISK_LEVEL as readonly string[]).includes(riskLevel) || selectedLenses.some((lens) => !(NATIVE_REVIEW_LENS as readonly string[]).includes(lens))) throw new Error("unknown start enum");
-			return { lineageId, state: "reviewing", riskLevel, selectedLenses, changedFiles: nonNegativeInteger(body.changed_files), changedLines: nonNegativeInteger(body.changed_lines), correctionBudget: nonNegativeInteger(body.correction_budget) };
+			const action = enumString(body.action, NATIVE_START_ACTION_VALUES) as NativeStartAction;
+			const lensesRequired = booleanValue(body.lenses_required);
+			if (
+				!(NATIVE_RISK_LEVEL as readonly string[]).includes(riskLevel) ||
+				selectedLenses.some((lens) => !(NATIVE_REVIEW_LENS as readonly string[]).includes(lens)) ||
+				!hasCanonicalSelectedLenses(riskLevel, selectedLenses) ||
+				!hasValidLensesRequired(action, body.state as string, riskLevel, lensesRequired)
+			) throw new Error("unknown or contradictory start enum");
+			return { lineageId, state: body.state as NativeStartResult["state"], riskLevel, selectedLenses, changedFiles: nonNegativeInteger(body.changed_files), changedLines: nonNegativeInteger(body.changed_lines), correctionBudget: nonNegativeInteger(body.correction_budget), action, lensesRequired };
 		});
 	}
 
@@ -497,4 +541,8 @@ export class NativeReviewCliV212 {
 	}
 }
 
-export function createNativeReviewCli(adapter = createNodeExecFileAdapter()): NativeReviewCliV212 { return new NativeReviewCliV212(adapter); }
+export function createNativeReviewCli(adapter = createNodeExecFileAdapter(), executable: string | (() => string) = resolveGentleAiBinary): NativeReviewCliV214 { return new NativeReviewCliV214(adapter, executable); }
+
+// Response-schema fixtures remain v2.1.3 historical contracts; the production
+// client above accepts only the v2.1.4 runtime release.
+export { NativeReviewCliV214 as NativeReviewCliV213 };

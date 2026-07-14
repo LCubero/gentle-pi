@@ -65,6 +65,8 @@ Most coding-agent sessions fail for operational reasons, not model reasons:
 pi install npm:gentle-pi
 ```
 
+The npm postinstall downloads the exact platform-specific official Gentle AI v2.1.4 archive into this package's private `.gentle-ai/v2.1.4/` directory and verifies its pinned SHA-256 before extraction. It never uses `PATH` or a global `gentle-ai` installation. For development or offline installs only, set `GENTLE_PI_SKIP_GENTLE_AI_INSTALL=1`; native review operations then fail closed with an actionable `package-local-binary-missing` error until the package is reinstalled normally.
+
 Recommended companion packages:
 
 ```bash
@@ -137,6 +139,8 @@ parent git/status + clarify → bind ordinary snapshot/route → one worker writ
 
 Review lenses are controller-selected transaction actors, not lifecycle hooks. `scout`/`context-builder` save parent context by compressing broad exploration. `worker` preserves a single writer thread. Commit, push, PR, and release validate receipts with zero actors.
 
+Review actors are dispatched only through parent `subagent_run` calls in `mode: "task"`. Before execution, the controller verifies every entry, content hash, mode, root, and index in one selected immutable candidate tree per requested lens, then appends one bounded controller-owned block containing only the Git-derived base-to-candidate changed scope. That compact scope groups present paths by exact candidate mode and lists deletions explicitly; it fails closed when the changed scope itself exceeds the dispatch bound. Mixed batches, unselected/missing/stale views, user-supplied candidate-view text, unsafe paths, and non-task dispatches fail closed; lean resources and actor tool allowlists remain unchanged.
+
 ### Review authority recovery and reset safety
 
 Legacy pre-graph authority is never migrated. `gentle_review inspect` reports an exact repository-bound destructive reset challenge; only that authorized RESET or RECOVER can quarantine graph-v1 and compact-v2 authority, initialize an empty graph-v1 incarnation, and require fresh review. Interrupted destructive recovery remains blocked until explicit forward recovery. Existing graph-v1 ordinary lineages remain readable, gate-validatable, and exportable but are read-only; Judgment Day remains mutable on graph-v1.
@@ -163,7 +167,27 @@ If multiple rows match, run the narrow set that covers the risk. For example, sh
 
 New ordinary review uses compact `gentle_review` `start -> finalize -> validate`.
 
-Native contract pairing is exact: this adapter supports `gentle-ai 2.1.2` only and rechecks that version before every native operation. Once v2.1.2 has written review authority, rollback MUST preserve every native store and receipt and MUST NOT run a downgraded binary against that repository. Disable the Pi route or roll forward to a compatible authority-aware release instead; deleting authority data or reinstalling an older binary is not a rollback path.
+Native contract pairing is exact: this adapter supports `gentle-ai 2.1.4` only from its package-local verified binary and rechecks that version before every native operation. Production native operations resolve an absolute package-owned path and never fall back to `PATH` or a global executable. Once v2.1.4 has written review authority, rollback MUST preserve every native store and receipt and MUST NOT run a downgraded binary against that repository. Disable the Pi route or roll forward to a compatible authority-aware release instead; deleting authority data or reinstalling an older binary is not a rollback path.
+
+### FINALIZE wrapper input
+
+`gentle_review` accepts `input` as a JSON-serialized object string. For initial results, provide `review_result.lens_results[]`; each selected lens appears exactly once with `lens`, `findings`, and non-empty `evidence`. A clean lens uses `findings: []`. `final_evidence` and `final_verification_passed` are paired: provide both or neither.
+
+```json
+{
+  "review_result": {
+    "lens_results": [
+      {
+        "lens": "review-reliability",
+        "findings": [],
+        "evidence": ["complete candidate reviewed"]
+      }
+    ]
+  }
+}
+```
+
+This is the Pi wrapper contract, not the native CLI file contract. The native command receives separate `--result`, `--refuter`, `--validation`, and `--evidence` files from the wrapper.
 
 START derives the complete Git/untracked snapshot, lineage, persisted `low | medium | high` tier, zero/one/four lenses, authored changed lines, and correction budget `min(200, ceil(original_changed_lines / 2))`. Generated `testdata/golden/**` stays in snapshot identity but does not count as authored risk lines.
 
@@ -204,7 +228,7 @@ Findings surviving round two escalate; no third-round transition exists.
 Compact gate validation is read-only. It loads authority and receipt, derives the live target, then reloads authority and rederives target/publication evidence immediately before allow.
 
 Pi also registers one one-shot authorization for the exact command and rederives its full publication target before registration, before bash-time native validation, and again after that validation before allowing the command. For `gh pr create`, the effective repository follows GitHub CLI precedence (`--repo`, then `GH_REPO`, then local inference), and both that source/value and the exact advertised remote head commit are bound and rechecked against reviewed local `HEAD`. Publication `ls-remote` probes are shell-free, output-bounded, time-bounded, and cancellation-aware. The complete bash-time publication/native revalidation uses one aggregate bounded deadline combined with Pi's cancellation signal when available. First-push, push destination, exact PR base/head, repository identity, release, and dangerous-command protections remain fail closed.
-Native pre-push to an existing branch is supported only when the effective push URL and repository identity equal the fetch URL and identity used by the exact `<remote>/<destination-branch>` selector, and its advertised commit equals the command update's old object. Split fetch/push topology is unsupported because PR #1216 introduced the upstream v2.1.1 `--base-ref` contract that v2.1.2 inherits unchanged: that contract resolves the selector through fetch-side remote-tracking state, and probing `pushurl` does not change selector resolution. Pi fails closed before native validation with `native-split-fetch-push-unsupported-until-upstream-supports-explicit-push-base`. Native pre-PR remains fetch-side and may use advertised remote selectors. Residual gap (separate follow-up): native first-push authorization remains unsupported until Pi has a persisted explicit advertised-base source. A missing destination fails closed with `native-first-push-unsupported-until-persisted-advertised-base-exists`; Pi never guesses a base from an upstream, default branch, or nearest ancestor.
+Native pre-push to an existing branch is supported only when the effective push URL and repository identity equal the fetch URL and identity used by the exact `<remote>/<destination-branch>` selector, and its advertised commit equals the command update's old object. Split fetch/push topology is unsupported because PR #1216 introduced the upstream v2.1.1 `--base-ref` contract that v2.1.3 inherits unchanged: that contract resolves the selector through fetch-side remote-tracking state, and probing `pushurl` does not change selector resolution. Pi fails closed before native validation with `native-split-fetch-push-unsupported-until-upstream-supports-explicit-push-base`. Native pre-PR remains fetch-side and may use advertised remote selectors. Residual gap (separate follow-up): native first-push authorization remains unsupported until Pi has a persisted explicit advertised-base source. A missing destination fails closed with `native-first-push-unsupported-until-persisted-advertised-base-exists`; Pi never guesses a base from an upstream, default branch, or nearest ancestor.
 
 Native SDD readiness is true only for `verify` or `archive` with empty blockers and a published `reviewGate.result: "allow"`; review/resolve-review, missing gate evidence, and every non-allow or stale result remain blocked.
 Release from protected `main` may bypass receipt validation only when the tag targets the current immutable `origin/main` SHA, required CI for that exact SHA is successful, the remote head is rechecked before tag push, and no fresh risk evidence exists; otherwise release fails closed through native receipt validation.

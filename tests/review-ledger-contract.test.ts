@@ -282,7 +282,7 @@ test("orchestrator, skill, and README agree on compact facade and compatibility"
 
 test("README documents the exact native pairing and authority-preserving rollback boundary", () => {
 	const content = read(README);
-	assert.match(content, /adapter supports `gentle-ai 2\.1\.2` only/i);
+	assert.match(content, /adapter supports `gentle-ai 2\.1\.4` only/i);
 	assert.match(content, /rechecks that version before every native operation/i);
 	assert.match(content, /rollback MUST preserve every native store and receipt/);
 	assert.match(content, /MUST NOT run a downgraded binary/i);

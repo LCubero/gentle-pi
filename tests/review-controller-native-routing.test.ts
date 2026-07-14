@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { __testing, createGentleAiExtension } from "../extensions/gentle-ai.ts";
-import { NativeReviewCliV212, type NativeReviewCli } from "../lib/native-review-cli.ts";
-import { domainHashV1 } from "../lib/review-canonical.ts";
+import { NativeReviewCliV214, type NativeReviewCli } from "../lib/native-review-cli.ts";
+import { canonicalJsonV1, domainHashV1 } from "../lib/review-canonical.ts";
 import { SupersessionStoreV1 } from "../lib/review-authority-supersession.ts";
+import { CandidateViewRegistry } from "../lib/review-candidate-view.ts";
 
 interface RegisteredTool {
 	execute: (
@@ -57,10 +58,11 @@ function runtime(
 	publicationProbe?: PublicationProbeFixture,
 	publicationProbeTimeoutMs?: number,
 	bashTimeRevalidationTimeoutMs?: number,
+	candidateViews: CandidateViewRegistry | null = null,
 ): Runtime {
 	const tools = new Map<string, RegisteredTool>();
 	let toolCall: ToolCallHandler | undefined;
-	const dependencies = { nativeReviewCli, publicationProbe, publicationProbeTimeoutMs, bashTimeRevalidationTimeoutMs } as unknown as Parameters<typeof createGentleAiExtension>[0];
+	const dependencies = { nativeReviewCli, publicationProbe, publicationProbeTimeoutMs, bashTimeRevalidationTimeoutMs, candidateViews } as unknown as Parameters<typeof createGentleAiExtension>[0];
 	createGentleAiExtension(dependencies)({
 		on(name: string, handler: ToolCallHandler) {
 		if (name === "tool_call") toolCall = handler;
@@ -199,7 +201,7 @@ function nativePrePrGateContext(boundary: PrePrBoundaryFixture): Awaited<ReturnT
 
 function fakeNative(overrides: Partial<NativeReviewCli> = {}): NativeReviewCli {
 	return {
-		start: async () => ({ lineageId: "native-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 7, correctionBudget: 4 }),
+		start: async () => ({ lineageId: "native-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 7, correctionBudget: 4, action: "created", lensesRequired: true }),
 		finalize: async () => ({ lineageId: "native-lineage", state: "approved", action: "approved", storeRevision: "r1", receiptPath: "/opaque/receipt" }),
 		validate: async () => ({ allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativeGateContext() }),
 		bindSdd: async () => ({ revision: "b1", change: "native-review-authority-parity", lineage: "native-lineage", authorityRevision: "r1", receiptHash: "receipt", gateContext: nativeBindingGateContext() }),
@@ -216,7 +218,7 @@ test("new ordinary START and native-lineage FINALIZE use exactly one native call
 	const { controller } = runtime(fakeNative({
 		start: async () => {
 			starts += 1;
-			return { lineageId: "native-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 7, correctionBudget: 4 };
+			return { lineageId: "native-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 7, correctionBudget: 4, action: "created", lensesRequired: true };
 		},
 		finalize: async () => {
 			finalizes += 1;
@@ -224,14 +226,181 @@ test("new ordinary START and native-lineage FINALIZE use exactly one native call
 		},
 	}));
 	const start = await controller.execute("start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
-	assert.deepEqual(start.details, { operation: "start", result: { lineage_id: "native-lineage", state: "reviewing", risk_tier: "medium", selected_lenses: ["review-reliability"], changed_files: 2, original_changed_lines: 7, correction_budget: 4 } });
+	assert.deepEqual(start.details, { operation: "start", result: { lineage_id: "native-lineage", state: "reviewing", risk_tier: "medium", selected_lenses: ["review-reliability"], changed_files: 2, original_changed_lines: 7, correction_budget: 4, action: "created", lenses_required: true } });
 	const finalize = await controller.execute("finalize", { operation: "finalize", lineageId: "native-lineage", input: JSON.stringify({ review_result: { lens_results: [{ findings: [], evidence: ["complete candidate reviewed"] }] } }) }, undefined, undefined, context(cwd));
 	assert.deepEqual(finalize.details, { operation: "finalize", result: { lineage_id: "native-lineage", state: "approved", action: "approved", store_revision: "r1", receipt_path: "/opaque/receipt" } });
 	assert.equal(starts, 1);
 	assert.equal(finalizes, 1);
 });
 
-test("native FINALIZE emits exact v2.1.2 process documents and failed verification argv intent", async (t) => {
+test("parent subagent_run mutates single and parallel review actors with one verified controller-owned candidate view", async (t) => {
+	const cwd = repository(t);
+	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
+	const candidateViews = new CandidateViewRegistry();
+	const { controller, toolCall } = runtime(fakeNative({
+		start: async () => ({
+			lineageId: "c3-lineage",
+			state: "reviewing",
+			riskLevel: "high",
+			selectedLenses: ["review-risk", "review-resilience", "review-readability", "review-reliability"],
+			changedFiles: 1,
+			changedLines: 1,
+			correctionBudget: 1,
+			action: "created",
+			lensesRequired: true,
+		}),
+	}), undefined, undefined, undefined, candidateViews);
+	await controller.execute("c3-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	const single = { agent: "review-risk", task: "Inspect the change", context: "ordinary review", mode: "task" };
+	assert.equal(await toolCall({ toolName: "subagent_run", input: single }, context(cwd)), undefined);
+	assert.match(single.task, /## Controller-owned candidate view/);
+	assert.match(single.task, /Frozen candidate tree:/);
+	assert.match(single.task, /ambient contributor working directory is out of scope/);
+	const parallel = { agents: ["review-risk", "review-resilience", "review-readability", "review-reliability"], task: "Inspect the change", mode: "task" };
+	assert.equal(await toolCall({ toolName: "subagent_run", input: parallel }, context(cwd)), undefined);
+	assert.match(parallel.task, /review-risk, review-resilience, review-readability, review-reliability/);
+	assert.match(parallel.task, /Frozen candidate tree:/);
+	candidateViews.resolveForLens("c3-lineage", "review-risk").cleanup();
+});
+
+test("parent subagent_run fails closed before child execution for malformed, mixed, stale, conflicting, unsafe, and non-task review dispatch", async (t) => {
+	const cwd = repository(t);
+	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
+	const candidateViews = new CandidateViewRegistry();
+	const { controller, toolCall } = runtime(fakeNative({
+		start: async () => ({ lineageId: "c3-fail-closed", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true }),
+	}), undefined, undefined, undefined, candidateViews);
+	await controller.execute("c3-start-fail-closed", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	for (const input of [
+		{ agent: "review-reliability", agents: ["review-reliability"], task: "review", mode: "task" },
+		{ agents: ["review-reliability", "worker"], task: "review", mode: "task" },
+		{ agent: "review-risk", task: "review", mode: "task" },
+		{ agent: "review-reliability", task: "review", mode: "background" },
+		{ agent: "review-reliability", task: "## Controller-owned candidate view", mode: "task" },
+		{ agent: "review-reliability", task: "review", mode: "task", unexpected: true },
+		{ agents: "review-reliability", task: "review", mode: "task" },
+		{ agents: ["review-reliability", 42], task: "review", mode: "task" },
+	]) {
+		const result = await toolCall({ toolName: "subagent_run", input }, context(cwd)) as { block?: boolean };
+		assert.equal(result.block, true);
+	}
+	const stale = candidateViews.resolveForLens("c3-fail-closed", "review-reliability");
+	chmodSync(stale.root, 0o755);
+	chmodSync(join(stale.root, "app.ts"), 0o644);
+	writeFileSync(join(stale.root, "app.ts"), "corrupted frozen content\n");
+	chmodSync(stale.root, 0o555);
+	chmodSync(join(stale.root, "app.ts"), 0o444);
+	const staleResult = await toolCall({ toolName: "subagent_run", input: { agent: "review-reliability", task: "review", mode: "task" } }, context(cwd)) as { block?: boolean };
+	assert.equal(staleResult.block, true);
+	candidateViews.cleanup(stale.token);
+});
+
+test("controller routes the authoritative START action/lenses_required matrix without local authority reconstruction", async (t) => {
+	const cwd = repository(t);
+	const scenarios = [
+		{ action: "created", lensesRequired: true, riskLevel: "medium", selectedLenses: ["review-reliability"] },
+		{ action: "created", lensesRequired: false, riskLevel: "low", selectedLenses: [] },
+		{ action: "resumed", lensesRequired: true, riskLevel: "medium", selectedLenses: ["review-reliability"] },
+		{ action: "resumed", lensesRequired: false, riskLevel: "medium", selectedLenses: ["review-reliability"] },
+		{ action: "reuse-receipt", lensesRequired: false, riskLevel: "low", selectedLenses: [] },
+		{ action: "blocked-scope-action", lensesRequired: false, riskLevel: "low", selectedLenses: [] },
+	] as const;
+	for (const [index, scenario] of scenarios.entries()) {
+		const candidateViews = new CandidateViewRegistry();
+		const lineageId = `native-lineage-${index}`;
+		const { controller } = runtime(fakeNative({
+			start: async () => ({ lineageId, state: scenario.action === "reuse-receipt" ? "approved" : "reviewing", riskLevel: scenario.riskLevel, selectedLenses: scenario.selectedLenses, changedFiles: 2, changedLines: 7, correctionBudget: 4, action: scenario.action, lensesRequired: scenario.lensesRequired }),
+		}), undefined, undefined, undefined, candidateViews);
+		const started = await controller.execute(`start-${scenario.action}-${scenario.lensesRequired}`, { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+		const result = (started.details as { result: Record<string, unknown> }).result;
+		assert.equal(result.action, scenario.action);
+		assert.equal(result.lenses_required, scenario.lensesRequired);
+		if (scenario.lensesRequired) {
+			const view = candidateViews.resolveForLens(lineageId, "review-reliability");
+			view.cleanup();
+		} else if (scenario.action === "created" || scenario.action === "resumed" || scenario.action === "reuse-receipt") {
+			assert.equal(candidateViews.resolveProjection(lineageId, cwd).candidateTree, git(cwd, "write-tree"));
+			candidateViews.cleanupTerminal(lineageId, "approved");
+		} else {
+			assert.throws(() => candidateViews.resolveProjection(lineageId, cwd), /missing|ambiguous/i);
+		}
+	}
+});
+
+test("low-risk native START retains its candidate view for the production zero-lens FINALIZE path", async (t) => {
+	const cwd = repository(t);
+	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
+	const candidateViews = new CandidateViewRegistry();
+	const finalizeCwds: string[] = [];
+	const { controller } = runtime(fakeNative({
+		start: async () => ({ lineageId: "low-risk-lineage", state: "reviewing", riskLevel: "low", selectedLenses: [], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: false }),
+		finalize: async (request) => {
+			finalizeCwds.push(request.cwd);
+			return { lineageId: "low-risk-lineage", state: "approved", action: "approved", storeRevision: "r1" };
+		},
+	}), undefined, undefined, undefined, candidateViews);
+	await controller.execute("low-risk-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	const finalized = await controller.execute("low-risk-finalize", { operation: "finalize", lineageId: "low-risk-lineage", input: JSON.stringify({}) }, undefined, undefined, context(cwd));
+	assert.equal(finalizeCwds.length, 1);
+	assert.notEqual(finalizeCwds[0], cwd);
+	assert.equal((finalized.details as { result: { state: string } }).result.state, "approved");
+});
+
+test("ambiguous native START replay preserves the exact request and returned authority identity", async (t) => {
+	const cwd = repository(t);
+	const candidateViews = new CandidateViewRegistry();
+	const requests: Parameters<NativeReviewCli["start"]>[0][] = [];
+	const { controller } = runtime(fakeNative({
+		start: async (request) => {
+			requests.push(request);
+			if (requests.length === 1) throw Object.assign(new Error("lost output"), { mutationOutcome: "unknown", nextAction: "replay-exact-native-operation" });
+			return { lineageId: "resumed-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 7, correctionBudget: 4, action: "resumed", lensesRequired: false };
+		},
+	}), undefined, undefined, undefined, candidateViews);
+	const request = { operation: "start", input: JSON.stringify({ mode: "ordinary" }) };
+	const ambiguous = await controller.execute("ambiguous-start", request, undefined, undefined, context(cwd));
+	assert.deepEqual(ambiguous.details, { operation: "start", status: "blocked", outcome: "native-operation-failed", mutation_performed: false, mutation_outcome: "unknown", next_action: "replay-exact-native-operation" });
+	const replay = await controller.execute("ambiguous-start-replay", request, undefined, undefined, context(cwd));
+	assert.equal(requests.length, 2);
+	assert.equal(requests[0]?.cwd, requests[1]?.cwd);
+	assert.equal(candidateViews.resolveProjection("resumed-lineage", cwd).candidateTree, git(cwd, "write-tree"));
+	candidateViews.cleanupTerminal("resumed-lineage", "approved");
+	assert.deepEqual(replay.details, { operation: "start", result: { lineage_id: "resumed-lineage", state: "reviewing", risk_tier: "medium", selected_lenses: ["review-reliability"], changed_files: 2, original_changed_lines: 7, correction_budget: 4, action: "resumed", lenses_required: false } });
+});
+
+test("ambiguous correction FINALIZE reuses its immutable corrected view despite contributor changes", async (t) => {
+	const cwd = repository(t);
+	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
+	const candidateViews = new CandidateViewRegistry();
+	const requests: Parameters<NativeReviewCli["finalize"]>[0][] = [];
+	const observedContent: string[] = [];
+	const { controller } = runtime(fakeNative({
+		start: async () => ({ lineageId: "correction-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true }),
+		finalize: async (request) => {
+			requests.push(request);
+			if (requests.length === 1) throw Object.assign(new Error("lost output"), { mutationOutcome: "unknown", nextAction: "replay-exact-native-operation" });
+			observedContent.push(readFileSync(join(request.cwd, "app.ts"), "utf8"));
+			return { lineageId: "correction-lineage", state: "approved", action: "approved", storeRevision: "r2" };
+		},
+	}), undefined, undefined, undefined, candidateViews);
+	await controller.execute("correction-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	writeFileSync(join(cwd, "app.ts"), "export const value = 3;\n");
+	const input = JSON.stringify({
+		correction_line_forecast: 1,
+		validation: { request_hash: "b".repeat(64), correction_ids: ["RELIABILITY-001"], original_criteria: { passed: true, evidence: ["fixed"] }, correction_regression: { passed: true, evidence: ["covered"] }, fix_caused_findings: [], follow_ups: [] },
+		final_evidence: "focused tests passed",
+		final_verification_passed: true,
+	});
+	const ambiguous = await controller.execute("correction-finalize", { operation: "finalize", lineageId: "correction-lineage", input }, undefined, undefined, context(cwd));
+	assert.equal((ambiguous.details as { mutation_outcome: string }).mutation_outcome, "unknown");
+	writeFileSync(join(cwd, "app.ts"), "export const value = 4;\n");
+	await controller.execute("correction-finalize-replay", { operation: "finalize", lineageId: "correction-lineage", input }, undefined, undefined, context(cwd));
+	assert.equal(requests.length, 2);
+	assert.equal(requests[0]?.cwd, requests[1]?.cwd);
+	assert.deepEqual(observedContent, ["export const value = 3;\n"]);
+});
+
+test("native FINALIZE emits exact v2.1.4 process documents and failed verification argv intent", async (t) => {
 	const cwd = repository(t);
 	const refuterBatch = {
 		schema: "gentle-ai.refuter-result-batch/v1",
@@ -317,8 +486,8 @@ test("controller preserves final evidence bytes through native staging", async (
 	const cwd = repository(t);
 	const evidence = " \tleading and trailing evidence\n\n";
 	let staged = "";
-	const native = new NativeReviewCliV212(async (request) => {
-		if (request.arguments[0] === "version") return { stdout: "gentle-ai 2.1.2\n", stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
+	const native = new NativeReviewCliV214(async (request) => {
+		if (request.arguments[0] === "version") return { stdout: "gentle-ai 2.1.4\n", stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
 		const index = request.arguments.indexOf("--evidence");
 		assert.ok(index >= 0);
 		staged = readFileSync(request.arguments[index + 1]!, "utf8");
@@ -373,7 +542,7 @@ test("native START uses the default policy or a canonical safe policy path, and 
 	const { controller } = runtime(fakeNative({
 		start: async (request) => {
 			requests.push(request);
-			return { lineageId: "native-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 7, correctionBudget: 4 };
+			return { lineageId: "native-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 7, correctionBudget: 4, action: "created", lensesRequired: true };
 		},
 	}));
 	await controller.execute("default-policy", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
@@ -408,7 +577,7 @@ test("native START forwards a validated base ref and rejects invalid values befo
 	const { controller } = runtime(fakeNative({
 		start: async (request) => {
 			requests.push(request);
-			return { lineageId: "native-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 7, correctionBudget: 4 };
+			return { lineageId: "native-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 7, correctionBudget: 4, action: "created", lensesRequired: true };
 		},
 	}));
 	await controller.execute("committed-base", { operation: "start", input: JSON.stringify({ mode: "ordinary", baseRef: "origin/main" }) }, undefined, undefined, context(cwd));
@@ -433,7 +602,7 @@ test("native ordinary START blocks unknown input fields before native calls", as
 	const { controller } = runtime(fakeNative({
 		start: async () => {
 			starts += 1;
-			return { lineageId: "native-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 7, correctionBudget: 4 };
+			return { lineageId: "native-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 7, correctionBudget: 4, action: "created", lensesRequired: true };
 		},
 	}));
 	for (const field of ["base_ref", "unexpected"]) {
@@ -485,7 +654,7 @@ test("general STATUS and complete mixed inventory are unsupported without native
 			inventory_complete: false,
 			next_action: "require-upstream-read-only-native-status-inventory",
 			evidence: {
-				native_contract: "gentle-ai/2.1.2",
+				native_contract: "gentle-ai/2.1.4",
 				general_status: "unsupported",
 				claimant_inventory: "unsupported",
 			},
@@ -578,6 +747,105 @@ test("native allow registers one authorization and bash-time revalidation consum
 	const replay = await toolCall({ toolName: "bash", input: { command } }, context(cwd)) as { block: boolean };
 	assert.equal(replay.block, true);
 	assert.equal(validates, 2);
+});
+
+test("fresh candidate registry binds a resumed zero-lens native START through FINALIZE and pre-commit", async (t) => {
+	const cwd = repository(t);
+	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
+	const candidateViews = new CandidateViewRegistry();
+	let finalizedCwd = "";
+	let validations = 0;
+	const lineageId = "resumed-after-reload";
+	const { controller } = runtime(fakeNative({
+		start: async () => ({ lineageId, state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "resumed", lensesRequired: false }),
+		finalize: async (request) => {
+			finalizedCwd = request.cwd;
+			return { lineageId, state: "approved", action: "approved", storeRevision: "r1" };
+		},
+		validate: async () => {
+			validations += 1;
+			return { allowed: true, result: "allow", action: "continue", reason: "native receipt matches", gateContext: nativeGateContext(lineageId, "r1", git(cwd, "write-tree")) };
+		},
+	}), undefined, undefined, undefined, candidateViews);
+	await controller.execute("resume-after-reload", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	await controller.execute("resume-finalize", { operation: "finalize", lineageId, input: JSON.stringify({}) }, undefined, undefined, context(cwd));
+	assert.notEqual(finalizedCwd, cwd);
+	git(cwd, "add", "--", "app.ts");
+	const validated = await controller.execute("resume-pre-commit", { operation: "validate", lineageId, idempotencyKey: "resume", command: "git commit -m resumed", input: "{}" }, undefined, undefined, context(cwd));
+	assert.equal(validations, 1);
+	assert.notEqual((validated.details as { authorization?: unknown }).authorization, undefined);
+});
+
+test("native pre-commit after reload delegates exact-tree validation when no local projection exists", async (t) => {
+	const cwd = repository(t);
+	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
+	git(cwd, "add", "--", "app.ts");
+	let validations = 0;
+	const { controller } = runtime(fakeNative({
+		validate: async () => {
+			validations += 1;
+			return { allowed: true, result: "allow", action: "continue", reason: "native receipt matches", gateContext: nativeGateContext("reloaded-lineage", "r1", git(cwd, "write-tree")) };
+		},
+	}), undefined, undefined, undefined, new CandidateViewRegistry());
+	const validated = await controller.execute("reload-pre-commit", { operation: "validate", lineageId: "reloaded-lineage", idempotencyKey: "reload", command: "git commit -m reload", input: "{}" }, undefined, undefined, context(cwd));
+	assert.equal(validations, 1);
+	assert.notEqual((validated.details as { authorization?: unknown }).authorization, undefined);
+});
+
+test("native pre-commit rejects an unproven staged projection before native authorization", async (t) => {
+	const cwd = repository(t);
+	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
+	writeFileSync(join(cwd, "initially-untracked.ts"), "export const untracked = true;\n");
+	const candidateViews = new CandidateViewRegistry();
+	let validations = 0;
+	const { controller } = runtime(fakeNative({
+		validate: async () => {
+			validations += 1;
+			return { allowed: true, result: "allow", action: "continue", reason: "native allow must not bypass Pi projection checks", gateContext: nativeGateContext() };
+		},
+	}), undefined, undefined, undefined, candidateViews);
+	const started = await controller.execute("start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	const lineageId = (started.details as { result: { lineage_id: string } }).result.lineage_id;
+	await controller.execute("finalize", { operation: "finalize", lineageId, input: JSON.stringify({ review_result: { lens_results: [{ findings: [], evidence: ["candidate reviewed"] }] } }) }, undefined, undefined, context(cwd));
+	writeFileSync(join(cwd, "app.ts"), "export const value = 3;\n");
+	git(cwd, "add", "--", "app.ts", "initially-untracked.ts");
+	const result = await controller.execute("validate", { operation: "validate", lineageId, idempotencyKey: "projection-drift", command: "git commit -m native", input: "{}" }, undefined, undefined, context(cwd));
+	assert.equal((result.details as { status?: string }).status, "blocked");
+	assert.equal(validations, 0);
+});
+
+test("native pre-commit binds the exact tracked and initially-untracked projection through bash-time revalidation", async (t) => {
+	const cwd = repository(t);
+	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
+	writeFileSync(join(cwd, "initially-untracked.ts"), "export const untracked = true;\n");
+	const candidateViews = new CandidateViewRegistry();
+	let validations = 0;
+	const native = fakeNative({
+		validate: async () => {
+			validations += 1;
+			return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativeGateContext("native-lineage", "r1", git(cwd, "write-tree")) };
+		},
+	});
+	const { controller, toolCall } = runtime(native, undefined, undefined, undefined, candidateViews);
+	const started = await controller.execute("start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	const lineageId = (started.details as { result: { lineage_id: string } }).result.lineage_id;
+	await controller.execute("finalize", { operation: "finalize", lineageId, input: JSON.stringify({ review_result: { lens_results: [{ findings: [], evidence: ["candidate reviewed"] }] } }) }, undefined, undefined, context(cwd));
+	git(cwd, "add", "--", "app.ts", "initially-untracked.ts");
+	const command = "git commit -m exact-projection";
+	const allowed = await controller.execute("validate", { operation: "validate", lineageId, idempotencyKey: "exact-projection", command, input: "{}" }, undefined, undefined, context(cwd));
+	assert.notEqual((allowed.details as { authorization?: unknown }).authorization, undefined);
+	assert.equal(await toolCall({ toolName: "bash", input: { command } }, interactiveContext(cwd)), undefined);
+	assert.equal(validations, 2);
+
+	for (const unsupported of ["git commit -a -m broad", "git commit app.ts -m pathspec", "git commit --pathspec-from-file=paths -m wrapper"]) {
+		const rejected = await toolCall({ toolName: "bash", input: { command: unsupported } }, context(cwd)) as { block: boolean };
+		assert.equal(rejected.block, true);
+	}
+	writeFileSync(join(cwd, "harness-artifact.txt"), "must not be staged\n");
+	git(cwd, "add", "--", "harness-artifact.txt");
+	const drifted = await controller.execute("validate", { operation: "validate", lineageId, idempotencyKey: "extra-path", command, input: "{}" }, undefined, undefined, context(cwd));
+	assert.equal((drifted.details as { status?: string }).status, "blocked");
+	assert.equal(validations, 2);
 });
 
 test("native gate context mismatches create zero controller authorizations", async (t) => {
@@ -721,9 +989,9 @@ test("native lifecycle routing blocks review and accepts verify/archive as post-
 	writeFileSync(join(root, "specs", "review", "spec.md"), "# Spec\n");
 	writeFileSync(join(root, "design.md"), "# Design\n");
 	writeFileSync(join(root, "tasks.md"), "- [x] done\n");
-	const nativeStatus = JSON.parse(readFileSync(join(import.meta.dirname, "fixtures", "native-review-cli", "v2.1.2", "sdd-status.json"), "utf8")) as Record<string, unknown>;
-	const client = (nextRecommended: "review" | "verify" | "archive") => new NativeReviewCliV212(async (request) => ({
-		stdout: request.arguments[0] === "version" ? "gentle-ai 2.1.2\n" : JSON.stringify({ ...nativeStatus, nextRecommended }),
+	const nativeStatus = JSON.parse(readFileSync(join(import.meta.dirname, "fixtures", "native-review-cli", "v2.1.3", "sdd-status.json"), "utf8")) as Record<string, unknown>;
+	const client = (nextRecommended: "review" | "verify" | "archive") => new NativeReviewCliV214(async (request) => ({
+		stdout: request.arguments[0] === "version" ? "gentle-ai 2.1.4\n" : JSON.stringify({ ...nativeStatus, nextRecommended }),
 		stderr: "",
 		exitCode: 0,
 		signal: null,
@@ -757,11 +1025,11 @@ test("startup native readiness aborts each stalled probe at the short startup bo
 	writeFileSync(join(root, "tasks.md"), "- [x] done\n");
 	for (const stalledOperation of ["version", "sdd-status"] as const) {
 		const requests: Array<{ operation: string; signal: AbortSignal | undefined }> = [];
-		const stalled = new NativeReviewCliV212(async (request) => {
+		const stalled = new NativeReviewCliV214(async (request) => {
 			const operation = request.arguments[0]!;
 			requests.push({ operation, signal: request.signal });
 			if (operation === "version" && stalledOperation === "sdd-status") {
-				return { stdout: "gentle-ai 2.1.2\n", stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
+				return { stdout: "gentle-ai 2.1.4\n", stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
 			}
 			return new Promise<never>((_resolve, reject) => {
 				const cancel = () => {
@@ -805,24 +1073,265 @@ test("recovery obligation blocks pending implementation before native review rea
 	assert.equal(status.dependencies.apply, "blocked");
 });
 
-test("native ordinary START blocks every discovered legacy claimant before any native call", async (t) => {
+test("native ordinary START distinguishes unrelated compact history from an exact compact claimant", async (t) => {
 	const cwd = repository(t);
-	(await import("../lib/review-facade.ts")).startCompactReview({
+	const compact = await import("../lib/review-facade.ts");
+	compact.startCompactReview({
 		cwd,
-		lineageId: "legacy-compact",
+		lineageId: "historical-compact",
 		policyHash: "a".repeat(64),
 		projection: { kind: "complete" },
 	});
+	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
 	let starts = 0;
 	const { controller } = runtime(fakeNative({
 		start: async () => {
 			starts += 1;
-			return { lineageId: "native-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: [], changedFiles: 0, changedLines: 0, correctionBudget: 0 };
+			return { lineageId: "native-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: [], changedFiles: 0, changedLines: 0, correctionBudget: 0, action: "created", lensesRequired: false };
 		},
 	}));
-	const result = await controller.execute("legacy-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
-	assert.equal((result.details as { status: string }).status, "blocked");
+	const unrelated = await controller.execute("unrelated-history", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	assert.equal((unrelated.details as { result: { lineage_id: string } }).result.lineage_id, "native-lineage");
+	assert.equal(starts, 1);
+
+	writeFileSync(join(cwd, "app.ts"), "export const value = 1;\n");
+	const matching = await controller.execute("matching-history", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	assert.deepEqual(matching.details, {
+		operation: "start",
+		status: "blocked",
+		outcome: "compact-authority-nonterminal",
+		mutation_performed: false,
+		next_action: "stop-and-resolve-existing-compact-authority",
+		lineage_ids: ["historical-compact"],
+	});
+	assert.equal(starts, 1);
+});
+
+test("explicit native selectors bypass a matching compact claimant and preserve the native response", async (t) => {
+	for (const selector of ["policyPath", "baseRef"] as const) {
+		const cwd = repository(t);
+		const compact = await import("../lib/review-facade.ts");
+		compact.startCompactReview({ cwd, lineageId: `matching-${selector}`, policyHash: "a".repeat(64), projection: { kind: "complete" } });
+		const requests: Parameters<NativeReviewCli["start"]>[0][] = [];
+		const { controller } = runtime(fakeNative({
+			start: async (request) => {
+				requests.push(request);
+				return { lineageId: `native-${selector}`, state: "reviewing", riskLevel: "medium", selectedLenses: [], changedFiles: 0, changedLines: 0, correctionBudget: 0, action: "blocked-scope-action", lensesRequired: false };
+			},
+		}));
+		const policyPath = join(cwd, ".gentle-ai", "policies", "alternate.json");
+		if (selector === "policyPath") { mkdirSync(dirname(policyPath), { recursive: true }); writeFileSync(policyPath, "{}\n"); }
+		const result = await controller.execute(`explicit-${selector}`, { operation: "start", input: JSON.stringify(selector === "policyPath" ? { mode: "ordinary", policyPath: ".gentle-ai/policies/alternate.json" } : { mode: "ordinary", baseRef: "refs/heads/main" }) }, undefined, undefined, context(cwd));
+		assert.equal(requests.length, 1);
+		assert.equal((result.details as { result: { action: string } }).result.action, "blocked-scope-action");
+		assert.equal(selector === "policyPath" ? requests[0]?.policyPath : requests[0]?.baseRef, selector === "policyPath" ? policyPath : "refs/heads/main");
+	}
+});
+
+test("native ordinary START fails closed for a matching correction-required compact claimant without mutating history", async (t) => {
+	const cwd = repository(t);
+	const compact = await import("../lib/review-facade.ts");
+	const matching = compact.startCompactReview({
+		cwd,
+		lineageId: "matching-correction-required",
+		policyHash: "a".repeat(64),
+		projection: { kind: "complete" },
+	});
+	const before = readFileSync(compact.discoverCompactReview(cwd, matching.lineage_id).store.statePath, "utf8");
+	let starts = 0;
+	const { controller } = runtime(fakeNative({
+		start: async () => {
+			starts += 1;
+			return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: [], changedFiles: 0, changedLines: 0, correctionBudget: 0, action: "created", lensesRequired: false };
+		},
+	}));
+	const result = await controller.execute("matching-correction-required", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	assert.deepEqual(result.details, {
+		operation: "start",
+		status: "blocked",
+		outcome: "compact-authority-nonterminal",
+		mutation_performed: false,
+		next_action: "stop-and-resolve-existing-compact-authority",
+		lineage_ids: ["matching-correction-required"],
+	});
 	assert.equal(starts, 0);
+	assert.equal(readFileSync(compact.discoverCompactReview(cwd, matching.lineage_id).store.statePath, "utf8"), before);
+});
+
+test("native C2 applicability matrix preserves historical compact authority and closes unsafe claimants", async (t) => {
+	const compact = await import("../lib/review-facade.ts");
+	const policyHash = "a".repeat(64);
+	const approve = (cwd: string, lineageId: string, value: number) => {
+		writeFileSync(join(cwd, "app.ts"), `export const value = ${value};\n`);
+		const started = compact.startCompactReview({ cwd, lineageId, policyHash, projection: { kind: "complete" } });
+		assert.equal(compact.finalizeCompactReview({
+			cwd,
+			lineageId,
+			review_result: { lens_results: [{ findings: [], evidence: ["fixture candidate reviewed"] }] },
+			final_evidence: "fixture verification passed",
+			final_verification_passed: true,
+		}).state, "approved");
+		return started.lineage_id;
+	};
+	const escalate = (cwd: string, lineageId: string, value: number) => {
+		writeFileSync(join(cwd, "app.ts"), `export const value = ${value};\n`);
+		const started = compact.startCompactReview({ cwd, lineageId, policyHash, projection: { kind: "complete" } });
+		assert.equal(compact.finalizeCompactReview({
+			cwd,
+			lineageId,
+			review_result: { lens_results: [{ findings: [], evidence: ["fixture candidate reviewed"] }] },
+			final_evidence: "fixture verification failed",
+			final_verification_passed: false,
+		}).state, "escalated");
+		return started.lineage_id;
+	};
+	const correctionRequired = (cwd: string, lineageId: string, value: number) => {
+		writeFileSync(join(cwd, "app.ts"), [
+			`export const value = ${value};`,
+			"export const one = 1;",
+			"export const two = 2;",
+			"export const three = 3;",
+			"",
+		].join("\n"));
+		const started = compact.startCompactReview({ cwd, lineageId, policyHash, projection: { kind: "complete" } });
+		assert.equal(compact.finalizeCompactReview({
+			cwd,
+			lineageId,
+			review_result: {
+				lens_results: [{
+					findings: [{
+						id: "RELIABILITY-001",
+						location: "app.ts:1",
+						severity: "BLOCKER",
+						claim: "Fixture requires correction.",
+						evidence_class: "deterministic",
+						causal_disposition: "introduced",
+						proof_refs: ["changed-hunk:app.ts:1"],
+					}],
+					evidence: ["fixture candidate reviewed"],
+				}],
+			},
+		}).state, "correction_required");
+		return started.lineage_id;
+	};
+	const authorityBytes = (cwd: string, lineageIds: readonly string[]) => Object.fromEntries(
+		lineageIds.flatMap((lineageId) => {
+			const store = compact.discoverCompactReview(cwd, lineageId).store;
+			return [store.statePath, ...(compact.discoverCompactReview(cwd, lineageId).record.state.state === "approved" || compact.discoverCompactReview(cwd, lineageId).record.state.state === "escalated" ? [store.receiptPath] : [])]
+				.map((path) => [path, readFileSync(path, "utf8")]);
+		}),
+	);
+
+	await t.test("seven unrelated valid lineages reach native START once without authority mutation", async (t) => {
+		const cwd = repository(t);
+		const lineageIds = [
+			...([2, 3, 4, 5, 6].map((value) => approve(cwd, `approved-${value}`, value))),
+			escalate(cwd, "escalated-7", 7),
+			correctionRequired(cwd, "correction-required-8", 8),
+		];
+		writeFileSync(join(cwd, "app.ts"), "export const value = 9;\n");
+		const before = authorityBytes(cwd, lineageIds);
+		let starts = 0;
+		const { controller } = runtime(fakeNative({ start: async () => {
+			starts += 1;
+			return { lineageId: "native-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
+		} }));
+		const inspected = await controller.execute("c2-unrelated-inspect", { operation: "inspect" }, undefined, undefined, context(cwd));
+		assert.equal((inspected.details as { status: string }).status, "ready");
+		assert.equal((inspected.details as { compact_authority_applicability?: string }).compact_authority_applicability, "unrelated-history");
+		const started = await controller.execute("c2-unrelated-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+		assert.equal((started.details as { result: { lineage_id: string } }).result.lineage_id, "native-lineage");
+		assert.equal(starts, 1);
+		assert.deepEqual(authorityBytes(cwd, lineageIds), before);
+	});
+
+	await t.test("matching approved receipt routes compatible read/gate and invalid receipts fail closed", async (t) => {
+		for (const mode of ["valid", "missing", "malformed", "mismatched"] as const) {
+			await t.test(mode, async (t) => {
+				const cwd = repository(t);
+				const matching = approve(cwd, "matching-approved", 2);
+				const store = compact.discoverCompactReview(cwd, matching).store;
+				const before = readFileSync(store.statePath, "utf8");
+				if (mode === "missing") renameSync(store.receiptPath, `${store.receiptPath}.missing`);
+				if (mode === "malformed") writeFileSync(store.receiptPath, "not-json");
+				if (mode === "mismatched") {
+					const other = approve(cwd, "unrelated-approved", 3);
+					writeFileSync(store.receiptPath, readFileSync(compact.discoverCompactReview(cwd, other).store.receiptPath, "utf8"));
+					writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
+				}
+				let starts = 0;
+				const { controller } = runtime(fakeNative({ start: async () => {
+					starts += 1;
+					return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: [], changedFiles: 0, changedLines: 0, correctionBudget: 0, action: "created", lensesRequired: false };
+				} }));
+				const result = await controller.execute(`matching-approved-${mode}`, { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+				const details = result.details as Record<string, unknown>;
+				assert.equal(starts, 0);
+				assert.equal(details.outcome, mode === "valid" ? "compact-authority-compatible-receipt" : "compact-authority-invalid");
+				assert.equal(details.next_action, mode === "valid" ? "use-compatible-read-or-gate-route" : "stop-and-report-invalid-compact-authority");
+				assert.equal(readFileSync(store.statePath, "utf8"), before);
+			});
+		}
+	});
+
+	await t.test("matching escalated, correction-required, ambiguous, corrupt, and identity-broken authority fail closed", async (t) => {
+		const closed = async (name: string, arrange: (cwd: string) => string[]) => {
+			const cwd = repository(t);
+			const lineageIds = arrange(cwd);
+			const before = authorityBytes(cwd, lineageIds);
+			let starts = 0;
+			const { controller } = runtime(fakeNative({ start: async () => {
+				starts += 1;
+				return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: [], changedFiles: 0, changedLines: 0, correctionBudget: 0, action: "created", lensesRequired: false };
+			} }));
+			const result = await controller.execute(`c2-${name}`, { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+			assert.equal((result.details as Record<string, unknown>).outcome, `compact-authority-${name === "correction-required" ? "nonterminal" : name}`);
+			assert.equal(starts, 0);
+			assert.deepEqual(authorityBytes(cwd, lineageIds), before);
+		};
+		await closed("escalated", (cwd) => [escalate(cwd, "matching-escalated", 2)]);
+		await closed("correction-required", (cwd) => [correctionRequired(cwd, "matching-correction", 2)]);
+		await closed("ambiguous", (cwd) => [
+			compact.startCompactReview({ cwd, lineageId: "matching-one", policyHash, projection: { kind: "complete" } }).lineage_id,
+			compact.startCompactReview({ cwd, lineageId: "matching-two", policyHash, projection: { kind: "complete" } }).lineage_id,
+		]);
+		await t.test("corrupt compact record", async (t) => {
+			const cwd = repository(t);
+			const lineageId = compact.startCompactReview({ cwd, lineageId: "corrupt", policyHash, projection: { kind: "complete" } }).lineage_id;
+			const statePath = compact.discoverCompactReview(cwd, lineageId).store.statePath;
+			writeFileSync(statePath, "corrupt compact authority");
+			const before = readFileSync(statePath, "utf8");
+			let starts = 0;
+			const { controller } = runtime(fakeNative({ start: async () => {
+				starts += 1;
+				return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: [], changedFiles: 0, changedLines: 0, correctionBudget: 0, action: "created", lensesRequired: false };
+			} }));
+			const result = await controller.execute("c2-invalid", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+			assert.equal((result.details as Record<string, unknown>).outcome, "compact-authority-invalid");
+			assert.equal(starts, 0);
+			assert.equal(readFileSync(statePath, "utf8"), before);
+		});
+		await t.test("identity-broken inspection", async (t) => {
+			const cwd = repository(t);
+			approve(cwd, "identity-broken", 2);
+			const identityPath = join(cwd, ".git", "gentle-ai", "reviews", "IDENTITY");
+			writeFileSync(identityPath, canonicalJsonV1({
+				schema: "gentle-ai.review-repository/v1",
+				object_format: "sha1",
+				root_commit_ids: ["0".repeat(40)],
+			}));
+			const before = readFileSync(identityPath, "utf8");
+			let starts = 0;
+			const { controller } = runtime(fakeNative({ start: async () => {
+				starts += 1;
+				return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: [], changedFiles: 0, changedLines: 0, correctionBudget: 0, action: "created", lensesRequired: false };
+			} }));
+			const result = await controller.execute("c2-identity-broken", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+			assert.equal((result.details as Record<string, unknown>).outcome, "compact-authority-invalid");
+			assert.equal(starts, 0);
+			assert.equal(readFileSync(identityPath, "utf8"), before);
+		});
+	});
 });
 
 test("native pre-PR validation uses and binds the exact advertised ordinary base on both validations", async (t) => {
@@ -1190,7 +1699,7 @@ test("native pre-PR command binding detects push destination movement before bas
 	}
 });
 
-test("repository publication identity matches v2.1.2 URL host and scp vectors", () => {
+test("repository publication identity matches v2.1.3 URL host and scp vectors", () => {
 	const vectors = [
 		["https://user:secret@example.com:8443/Owner/Repo.git", "sha256:3e219f5a846e2947fe5d3d92ec5e30197b3d25b9f303c2cc42cdb7d7783297bc"],
 		["ssh://git@example.com:2222/Owner/Repo.git", "sha256:6ff118a31fd1ce7bd58c6709495b63bbdcf9bd2e0a2b1976e56acd356e76ad93"],
@@ -1530,7 +2039,7 @@ test("controller forwards its AbortSignal to mutating native requests", async (t
 	const { controller } = runtime(fakeNative({
 		start: async (request) => {
 			received = request.signal;
-			return { lineageId: "native-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: [], changedFiles: 0, changedLines: 0, correctionBudget: 0 };
+			return { lineageId: "native-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: [], changedFiles: 0, changedLines: 0, correctionBudget: 0, action: "created", lensesRequired: false };
 		},
 	}));
 	await controller.execute("start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, abort.signal, undefined, context(cwd));
@@ -1664,14 +2173,14 @@ test("native deny, target drift, and bash-time errors never restore an authoriza
 
 test("controller exposes every structured native denial recovery action from exit code 1", async (t) => {
 	const cwd = repository(t);
-	const published = JSON.parse(readFileSync(join(import.meta.dirname, "fixtures", "native-review-cli", "v2.1.2", "validate-deny.json"), "utf8")) as Record<string, unknown>;
+	const published = JSON.parse(readFileSync(join(import.meta.dirname, "fixtures", "native-review-cli", "v2.1.3", "validate-deny.json"), "utf8")) as Record<string, unknown>;
 	for (const [gateResult, action] of [
 		["scope-changed", "create-new-lineage"],
 		["invalidated", "explicit-maintainer-action"],
 		["escalated", "stop"],
 	] as const) {
-		const native = new NativeReviewCliV212(async (request) => ({
-			stdout: request.arguments[0] === "version" ? "gentle-ai 2.1.2\n" : JSON.stringify({ ...published, result: gateResult, action, context: { ...(published.context as Record<string, unknown>), gate: "pre-commit" } }),
+		const native = new NativeReviewCliV214(async (request) => ({
+			stdout: request.arguments[0] === "version" ? "gentle-ai 2.1.4\n" : JSON.stringify({ ...published, result: gateResult, action, context: { ...(published.context as Record<string, unknown>), gate: "pre-commit" } }),
 			stderr: request.arguments[0] === "version" ? "" : `Error: review gate denied: ${gateResult}\n`,
 			exitCode: request.arguments[0] === "version" ? 0 : 1,
 			signal: null,
@@ -1691,14 +2200,14 @@ test("controller exposes every structured native denial recovery action from exi
 	}
 });
 
-test("controller preserves every v2.1.2 empty-context pre-PR denial without authorization", async (t) => {
+test("controller preserves every historical response-schema empty-context pre-PR denial without authorization", async (t) => {
 	const cwd = repository(t);
 	addBareRemote(t, cwd, "origin");
 	git(cwd, "checkout", "-b", "feature");
 	commitFile(cwd, "feature.ts", "export const feature = true;\n", "feature");
 	git(cwd, "push", "origin", "feature:refs/heads/feature");
 	git(cwd, "config", "branch.feature.pushRemote", "origin");
-	const publishedText = readFileSync(join(import.meta.dirname, "fixtures", "native-review-cli", "v2.1.2", "validate-deny-empty-context.json"), "utf8");
+	const publishedText = readFileSync(join(import.meta.dirname, "fixtures", "native-review-cli", "v2.1.3", "validate-deny-empty-context.json"), "utf8");
 	const published = JSON.parse(publishedText) as Record<string, unknown>;
 	for (const [gateResult, action] of [
 		["scope-changed", "create-new-lineage"],
@@ -1706,9 +2215,9 @@ test("controller preserves every v2.1.2 empty-context pre-PR denial without auth
 		["escalated", "stop"],
 	] as const) {
 		const body = { ...published, result: gateResult, action };
-		const native = new NativeReviewCliV212(async (request) => ({
+		const native = new NativeReviewCliV214(async (request) => ({
 			stdout: request.arguments[0] === "version"
-				? "gentle-ai 2.1.2\n"
+				? "gentle-ai 2.1.4\n"
 				: gateResult === "invalidated" ? publishedText : JSON.stringify(body),
 			stderr: request.arguments[0] === "version" ? "" : `Error: review gate denied: ${gateResult}\n`,
 			exitCode: request.arguments[0] === "version" ? 0 : 1,
@@ -1727,4 +2236,45 @@ test("controller preserves every v2.1.2 empty-context pre-PR denial without auth
 		});
 		assert.equal((response.details as { authorization?: unknown }).authorization, undefined);
 	}
+});
+
+test("parallel 4R dispatch receives one compact changed scope and blocks oversized scope before any actor", async (t) => {
+	const cwd = repository(t);
+	for (let index = 0; index < 248; index += 1) {
+		writeFileSync(join(cwd, `unchanged-${String(index).padStart(3, "0")}.txt`), "base\n");
+	}
+	git(cwd, "add", ".");
+	git(cwd, "-c", "user.name=Native Test", "-c", "user.email=native@example.invalid", "commit", "-m", "many unchanged entries");
+	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
+	for (let index = 0; index < 44; index += 1) {
+		writeFileSync(join(cwd, `added-${String(index).padStart(3, "0")}.ts`), "export const changed = true;\n");
+	}
+	const candidateViews = new CandidateViewRegistry();
+	const lenses = ["review-risk", "review-resilience", "review-readability", "review-reliability"] as const;
+	const { controller, toolCall } = runtime(fakeNative({
+		start: async () => ({ lineageId: "c4-compact", state: "reviewing", riskLevel: "high", selectedLenses: lenses, changedFiles: 45, changedLines: 45, correctionBudget: 23, action: "created", lensesRequired: true }),
+	}), undefined, undefined, undefined, candidateViews);
+	await controller.execute("c4-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	const dispatch = { agents: [...lenses], task: "Review compact scope", mode: "task" };
+	assert.equal(await toolCall({ toolName: "subagent_run", input: dispatch }, context(cwd)), undefined, "compact scope would launch the 4R actors");
+	assert.match(dispatch.task, /Frozen changed scope by mode:/);
+	assert.doesNotMatch(dispatch.task, /unchanged-000\.txt/);
+	assert.ok(Buffer.byteLength(dispatch.task, "utf8") <= 4_096 + "Review compact scope".length);
+	writeFileSync(join(cwd, "app.ts"), "export const value = 3;\n");
+	const divergentDispatch = { agents: [...lenses], task: "Review compact scope", mode: "task" };
+	assert.equal(await toolCall({ toolName: "subagent_run", input: divergentDispatch }, context(cwd)), undefined);
+	assert.equal(divergentDispatch.task, dispatch.task, "parallel actors retain byte-identical frozen scope after live contributor divergence");
+	candidateViews.resolveForLens("c4-compact", "review-risk").cleanup();
+
+	for (let index = 0; index < 80; index += 1) {
+		writeFileSync(join(cwd, `oversized-${String(index).padStart(3, "0")}-${"x".repeat(80)}.ts`), "export const oversized = true;\n");
+	}
+	const oversizedViews = new CandidateViewRegistry();
+	const oversized = runtime(fakeNative({
+		start: async () => ({ lineageId: "c4-oversized", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 80, changedLines: 80, correctionBudget: 40, action: "created", lensesRequired: true }),
+	}), undefined, undefined, undefined, oversizedViews);
+	await oversized.controller.execute("c4-oversized-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	const rejected = await oversized.toolCall({ toolName: "subagent_run", input: { agent: "review-reliability", task: "Review oversized scope", mode: "task" } }, context(cwd)) as { block?: boolean };
+	assert.equal(rejected.block, true, "oversized scope blocks before an actor can launch");
+	oversizedViews.resolveForLens("c4-oversized", "review-reliability").cleanup();
 });

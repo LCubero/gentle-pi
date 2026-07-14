@@ -4,7 +4,7 @@ import test from "node:test";
 import {
 	NATIVE_REVIEW_ERROR_CODE,
 	NativeReviewCliError,
-	NativeReviewCliV212,
+	NativeReviewCliV213,
 	createNodeExecFileAdapter,
 	type ExecFileAdapter,
 	type NativeStartRequest,
@@ -39,12 +39,22 @@ function queuedAdapter(results: QueuedResult[]): { adapter: ExecFileAdapter; cal
 	};
 }
 
-const VERSION = { stdout: "gentle-ai 2.1.2\n" };
-const START = { stdout: JSON.stringify({ operation: "review/start", lineage_id: "lineage-1", state: "reviewing", risk_level: "medium", selected_lenses: ["review-reliability"], changed_files: 1, changed_lines: 2, correction_budget: 1 }) };
+const VERSION = { stdout: "gentle-ai 2.1.4\n" };
+const START = { stdout: JSON.stringify({ operation: "review/start", lineage_id: "lineage-1", state: "reviewing", risk_level: "medium", selected_lenses: ["review-reliability"], changed_files: 1, changed_lines: 2, correction_budget: 1, action: "created", lenses_required: true, projection: "workspace" }) };
+
+test("native START requires the v2.1.4 workspace projection", async () => {
+	const start = JSON.parse(START.stdout) as Record<string, unknown>;
+	assert.equal((await new NativeReviewCliV213(queuedAdapter([VERSION, { stdout: JSON.stringify({ ...start, projection: "workspace" }) }]).adapter).start({ cwd: "/repo" })).lineageId, "lineage-1");
+	const missing = Object.fromEntries(Object.entries(start).filter(([key]) => key !== "projection"));
+	for (const body of [missing, { ...start, projection: "repository" }]) {
+		const queue = queuedAdapter([VERSION, { stdout: JSON.stringify(body) }]);
+		await assert.rejects(() => new NativeReviewCliV213(queue.adapter).start({ cwd: "/repo" }), (error: unknown) => error instanceof NativeReviewCliError && error.code === NATIVE_REVIEW_ERROR_CODE.SCHEMA_INCOMPATIBLE);
+	}
+});
 
 test("native client re-verifies the pinned version before every operation and uses argv without a shell", async () => {
 	const queue = queuedAdapter([VERSION, START, VERSION, START, VERSION, START, VERSION, START]);
-	const client = new NativeReviewCliV212(queue.adapter);
+	const client = new NativeReviewCliV213(queue.adapter);
 	await client.start({ cwd: "/repo with spaces" });
 	await client.start({ cwd: "/repo with spaces", baseRef: "origin/main" });
 	await client.start({ cwd: "/repo with spaces", policyPath: "/repo with spaces/.gentle-ai/policies/team policy.json" });
@@ -62,9 +72,54 @@ test("native client re-verifies the pinned version before every operation and us
 	assert.equal(queue.calls.every((call) => call.cwd === "/repo with spaces"), true);
 });
 
+test("native START action/lenses_required matrix accepts only authoritative dispatch combinations", async () => {
+	const start = JSON.parse(START.stdout) as Record<string, unknown>;
+	const valid = [
+		{ action: "created", lenses_required: true, risk_level: "medium", selected_lenses: ["review-reliability"] },
+		{ action: "created", lenses_required: false, risk_level: "low", selected_lenses: [] },
+		{ action: "resumed", lenses_required: false, risk_level: "medium", selected_lenses: ["review-reliability"], state: "correction_required" },
+		{ action: "reuse-receipt", lenses_required: false, risk_level: "high", selected_lenses: ["review-risk", "review-resilience", "review-readability", "review-reliability"], state: "approved" },
+		{ action: "blocked-scope-action", lenses_required: false, risk_level: "low", selected_lenses: [] },
+	] as const;
+	for (const scenario of valid) {
+		const queue = queuedAdapter([VERSION, { stdout: JSON.stringify({ ...start, ...scenario }) }]);
+		const result = await new NativeReviewCliV213(queue.adapter).start({ cwd: "/repo" });
+		assert.equal(result.action, scenario.action);
+		assert.equal(result.lensesRequired, scenario.lenses_required);
+		assert.deepEqual(result.selectedLenses, scenario.selected_lenses);
+	}
+	for (const scenario of [
+		{ action: "created", lenses_required: false, risk_level: "medium", selected_lenses: [] },
+		{ action: "created", lenses_required: false, risk_level: "low", selected_lenses: ["review-reliability"] },
+		{ action: "reuse-receipt", lenses_required: true, risk_level: "medium", selected_lenses: ["review-reliability"] },
+		{ action: "blocked-scope-action", lenses_required: true, risk_level: "medium", selected_lenses: ["review-reliability"] },
+		{ action: "resumed", lenses_required: true, risk_level: "medium", selected_lenses: ["review-reliability"], state: "correction_required" },
+	] as const) {
+		const queue = queuedAdapter([VERSION, { stdout: JSON.stringify({ ...start, ...scenario }) }]);
+		await assert.rejects(() => new NativeReviewCliV213(queue.adapter).start({ cwd: "/repo" }), NativeReviewCliError);
+	}
+});
+
+test("native START binds every risk tier to canonical unique lenses before controller use", async () => {
+	const start = JSON.parse(START.stdout) as Record<string, unknown>;
+	const high = ["review-risk", "review-resilience", "review-readability", "review-reliability"];
+	const valid = queuedAdapter([VERSION, { stdout: JSON.stringify({ ...start, risk_level: "high", selected_lenses: high, lenses_required: false, action: "resumed", state: "validating" }) }]);
+	assert.deepEqual((await new NativeReviewCliV213(valid.adapter).start({ cwd: "/repo" })).selectedLenses, high);
+	for (const scenario of [
+		{ risk_level: "low", selected_lenses: [], lenses_required: true }, { risk_level: "medium", selected_lenses: ["review-risk", "review-reliability"], lenses_required: true },
+		{ risk_level: "medium", selected_lenses: ["review-reliability", "review-reliability"], lenses_required: true },
+		{ risk_level: "high", selected_lenses: high.slice(0, 3), lenses_required: true }, { risk_level: "high", selected_lenses: [...high, "review-risk"], lenses_required: true },
+		{ action: "created", risk_level: "high", selected_lenses: high, lenses_required: false },
+		{ action: "resumed", state: "approved", risk_level: "medium", selected_lenses: ["review-reliability"], lenses_required: true },
+	] as const) {
+		const queue = queuedAdapter([VERSION, { stdout: JSON.stringify({ ...start, ...scenario }) }]);
+		await assert.rejects(() => new NativeReviewCliV213(queue.adapter).start({ cwd: "/repo" }), NativeReviewCliError);
+	}
+});
+
 test("long-lived native client rejects a replaced incompatible executable before another operation", async () => {
 	const queue = queuedAdapter([VERSION, START, { stdout: "gentle-ai 2.1.0\n" }]);
-	const client = new NativeReviewCliV212(queue.adapter);
+	const client = new NativeReviewCliV213(queue.adapter);
 	await client.start({ cwd: "/repo" });
 	await assert.rejects(
 		() => client.start({ cwd: "/repo" }),
@@ -83,22 +138,24 @@ test("native START rejects invalid runtime base refs before any adapter invocati
 	for (const baseRef of ["", "   ", " origin/main", "origin/main ", "origin\0main", "origin\nmain", "origin\rmain", "origin\tmain", "origin\u007fmain", 42, [], {}]) {
 		const queue = queuedAdapter([]);
 		const request = { cwd: "/repo", baseRef } as unknown as NativeStartRequest;
-		await assert.rejects(() => new NativeReviewCliV212(queue.adapter).start(request), TypeError);
+		await assert.rejects(() => new NativeReviewCliV213(queue.adapter).start(request), TypeError);
 		assert.equal(queue.calls.length, 0);
 	}
 });
 
-test("native client rejects v2.1.1 with the pinned mismatch diagnostic and malformed allow output", async () => {
-	const incompatible = queuedAdapter([{ stdout: "gentle-ai 2.1.1\n" }]);
-	await assert.rejects(
-		() => new NativeReviewCliV212(incompatible.adapter).start({ cwd: "/repo" }),
-		(error: unknown) => error instanceof NativeReviewCliError
-			&& error.code === NATIVE_REVIEW_ERROR_CODE.VERSION_INCOMPATIBLE
-			&& error.message === "gentle-ai 2.1.2 is required",
-	);
+test("native client accepts only v2.1.4 and rejects v2.1.3 without fallback", async () => {
+	for (const rejectedVersion of ["2.1.1", "2.1.3"]) {
+		const incompatible = queuedAdapter([{ stdout: `gentle-ai ${rejectedVersion}\n` }]);
+		await assert.rejects(
+			() => new NativeReviewCliV213(incompatible.adapter).start({ cwd: "/repo" }),
+			(error: unknown) => error instanceof NativeReviewCliError
+				&& error.code === NATIVE_REVIEW_ERROR_CODE.VERSION_INCOMPATIBLE
+				&& error.message === "gentle-ai 2.1.4 is required",
+		);
+	}
 	const malformed = queuedAdapter([VERSION, { stdout: JSON.stringify({ ...JSON.parse(await fixture("validate-allow")), allowed: false }) }]);
 	await assert.rejects(
-		() => new NativeReviewCliV212(malformed.adapter).validate({ cwd: "/repo", gate: "post-apply", lineageId: "issue136-contract-runtime" }),
+		() => new NativeReviewCliV213(malformed.adapter).validate({ cwd: "/repo", gate: "post-apply", lineageId: "issue136-contract-runtime" }),
 		(error: unknown) => error instanceof NativeReviewCliError && error.code === NATIVE_REVIEW_ERROR_CODE.SCHEMA_INCOMPATIBLE,
 	);
 });
@@ -112,7 +169,7 @@ test("version process failures retain their typed failure code", async () => {
 	]) {
 		const queue = queuedAdapter([result]);
 		await assert.rejects(
-			() => new NativeReviewCliV212(queue.adapter).start({ cwd: "/repo" }),
+			() => new NativeReviewCliV213(queue.adapter).start({ cwd: "/repo" }),
 			(error: unknown) => error instanceof NativeReviewCliError && error.code === result.code && error.operation === "version",
 		);
 	}
@@ -121,7 +178,7 @@ test("version process failures retain their typed failure code", async () => {
 test("native mutation uncertainty requires exact replay", async () => {
 	const queue = queuedAdapter([VERSION, { stdout: "", timedOut: true }]);
 	await assert.rejects(
-		() => new NativeReviewCliV212(queue.adapter).start({ cwd: "/repo" }),
+		() => new NativeReviewCliV213(queue.adapter).start({ cwd: "/repo" }),
 		(error: unknown) => error instanceof NativeReviewCliError
 			&& error.code === NATIVE_REVIEW_ERROR_CODE.TIMEOUT
 			&& error.mutationOutcome === "unknown"
@@ -131,7 +188,7 @@ test("native mutation uncertainty requires exact replay", async () => {
 
 test("native validate requires a strict allow body", async () => {
 	const queue = queuedAdapter([VERSION, { stdout: await fixture("validate-allow") }]);
-	const result = await new NativeReviewCliV212(queue.adapter).validate({ cwd: "/repo", gate: "post-apply", lineageId: "issue136-contract-runtime" });
+	const result = await new NativeReviewCliV213(queue.adapter).validate({ cwd: "/repo", gate: "post-apply", lineageId: "issue136-contract-runtime" });
 	assert.equal(result.allowed, true);
 	assert.equal(result.action, "continue");
 	assert.equal(result.gateContext.lineageId, "issue136-contract-runtime");
@@ -147,7 +204,7 @@ test("native validate requires the returned gate context to equal the requested 
 			}),
 		}]);
 		await assert.rejects(
-			() => new NativeReviewCliV212(queue.adapter).validate({ cwd: "/repo", gate: "post-apply", lineageId: "issue136-contract-runtime" }),
+			() => new NativeReviewCliV213(queue.adapter).validate({ cwd: "/repo", gate: "post-apply", lineageId: "issue136-contract-runtime" }),
 			(error: unknown) => error instanceof NativeReviewCliError && error.code === NATIVE_REVIEW_ERROR_CODE.SCHEMA_INCOMPATIBLE,
 		);
 	}
@@ -161,7 +218,7 @@ test("native validate requires the returned gate context to equal the requested 
 		exitCode: 1,
 	}]);
 	await assert.rejects(
-		() => new NativeReviewCliV212(mismatch.adapter).validate({ cwd: "/repo", gate: "post-apply", lineageId: "issue136-contract-runtime" }),
+		() => new NativeReviewCliV213(mismatch.adapter).validate({ cwd: "/repo", gate: "post-apply", lineageId: "issue136-contract-runtime" }),
 		(error: unknown) => error instanceof NativeReviewCliError && error.code === NATIVE_REVIEW_ERROR_CODE.SCHEMA_INCOMPATIBLE,
 	);
 });
@@ -178,7 +235,7 @@ test("native validate decodes published structured denials from exit code 1", as
 			stderr: `Error: review gate denied: ${result}\n`,
 			exitCode: 1,
 		}]);
-		const denial = await new NativeReviewCliV212(queue.adapter).validate({ cwd: "/repo", gate: "post-apply", lineageId: "issue136-contract-runtime" });
+		const denial = await new NativeReviewCliV213(queue.adapter).validate({ cwd: "/repo", gate: "post-apply", lineageId: "issue136-contract-runtime" });
 		assert.deepEqual({ result: denial.result, allowed: denial.allowed, action: denial.action }, { result, allowed: false, action });
 		assert.equal(denial.gateContext.raw.gate, "");
 	}
@@ -195,7 +252,7 @@ test("native validate keeps malformed and unexpected nonzero exits typed", async
 	]) {
 		const queue = queuedAdapter([VERSION, scenario.result]);
 		await assert.rejects(
-			() => new NativeReviewCliV212(queue.adapter).validate({ cwd: "/repo", gate: "post-apply", lineageId: "issue136-contract-runtime" }),
+			() => new NativeReviewCliV213(queue.adapter).validate({ cwd: "/repo", gate: "post-apply", lineageId: "issue136-contract-runtime" }),
 			(error: unknown) => error instanceof NativeReviewCliError && error.code === scenario.code && error.operation === "review/validate",
 		);
 	}
@@ -204,7 +261,7 @@ test("native validate keeps malformed and unexpected nonzero exits typed", async
 		throw Object.assign(new Error("spawn"), { code: "ENOENT" });
 	};
 	await assert.rejects(
-		() => new NativeReviewCliV212(unavailable).validate({ cwd: "/repo", gate: "post-apply" }),
+		() => new NativeReviewCliV213(unavailable).validate({ cwd: "/repo", gate: "post-apply" }),
 		(error: unknown) => error instanceof NativeReviewCliError && error.code === NATIVE_REVIEW_ERROR_CODE.UNAVAILABLE,
 	);
 });
@@ -212,12 +269,12 @@ test("native validate keeps malformed and unexpected nonzero exits typed", async
 
 test("native decoders reject every one-field schema mutation", async () => {
 	const operations = [
-		{ fixtureName: "start", invoke: (client: NativeReviewCliV212) => client.start({ cwd: "/repo", lineageId: "lineage-1" }) },
-		{ fixtureName: "finalize", optionalKeys: ["receipt_path"], invoke: (client: NativeReviewCliV212) => client.finalize({ cwd: "/repo", lineageId: "lineage-1" }) },
-		{ fixtureName: "validate-allow", invoke: (client: NativeReviewCliV212) => client.validate({ cwd: "/repo", gate: "post-apply", lineageId: "issue136-contract-runtime" }) },
-		{ fixtureName: "bind-sdd", invoke: (client: NativeReviewCliV212) => client.bindSdd({ cwd: "/repo", change: "native-review-authority-parity", lineage: "issue136-contract-runtime", expectedBindingRevision: "" }) },
-		{ fixtureName: "sdd-status", optionalKeys: ["reviewGate", "reviewTransaction", "phaseInstructions"], invoke: (client: NativeReviewCliV212) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
-		{ fixtureName: "sdd-status-engram", optionalKeys: ["reviewGate", "reviewTransaction", "phaseInstructions"], invoke: (client: NativeReviewCliV212) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
+		{ fixtureName: "start", invoke: (client: NativeReviewCliV213) => client.start({ cwd: "/repo", lineageId: "lineage-1" }) },
+		{ fixtureName: "finalize", optionalKeys: ["receipt_path"], invoke: (client: NativeReviewCliV213) => client.finalize({ cwd: "/repo", lineageId: "lineage-1" }) },
+		{ fixtureName: "validate-allow", invoke: (client: NativeReviewCliV213) => client.validate({ cwd: "/repo", gate: "post-apply", lineageId: "issue136-contract-runtime" }) },
+		{ fixtureName: "bind-sdd", invoke: (client: NativeReviewCliV213) => client.bindSdd({ cwd: "/repo", change: "native-review-authority-parity", lineage: "issue136-contract-runtime", expectedBindingRevision: "" }) },
+		{ fixtureName: "sdd-status", optionalKeys: ["reviewGate", "reviewTransaction", "phaseInstructions"], invoke: (client: NativeReviewCliV213) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
+		{ fixtureName: "sdd-status-engram", optionalKeys: ["reviewGate", "reviewTransaction", "phaseInstructions"], invoke: (client: NativeReviewCliV213) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
 	];
 	for (const operation of operations) {
 		const fixtureBody = JSON.parse(await fixture(operation.fixtureName)) as Record<string, unknown>;
@@ -226,7 +283,7 @@ test("native decoders reject every one-field schema mutation", async () => {
 			delete missing[key];
 			for (const mutated of [...(operation.optionalKeys?.includes(key) ? [] : [missing]), { ...fixtureBody, [key]: typeof value === "string" ? 1 : "wrong-type" }]) {
 				const queue = queuedAdapter([VERSION, { stdout: JSON.stringify(mutated) }]);
-				await assert.rejects(() => operation.invoke(new NativeReviewCliV212(queue.adapter)), NativeReviewCliError, `${operation.fixtureName}.${key}`);
+				await assert.rejects(() => operation.invoke(new NativeReviewCliV213(queue.adapter)), NativeReviewCliError, `${operation.fixtureName}.${key}`);
 			}
 		}
 	}
@@ -239,31 +296,31 @@ test("native decoders reject nested mutations and unknown enums", async () => {
 	const start = JSON.parse(await fixture("start")) as Record<string, unknown>;
 	const finalization = JSON.parse(await fixture("finalize")) as Record<string, unknown>;
 	const cases = [
-		{ body: { ...start, risk_level: "unknown" }, invoke: (client: NativeReviewCliV212) => client.start({ cwd: "/repo" }) },
-		{ body: { ...start, selected_lenses: ["unknown"] }, invoke: (client: NativeReviewCliV212) => client.start({ cwd: "/repo" }) },
-		{ body: { ...finalization, state: "unknown" }, invoke: (client: NativeReviewCliV212) => client.finalize({ cwd: "/repo" }) },
-		{ body: { ...validate, context: { ...(validate.context as Record<string, unknown>), extra: true } }, invoke: (client: NativeReviewCliV212) => client.validate({ cwd: "/repo", gate: "post-apply" }) },
-		{ body: { ...bind, gate_context: { ...(bind.gate_context as Record<string, unknown>), candidate_tree: 1 } }, invoke: (client: NativeReviewCliV212) => client.bindSdd({ cwd: "/repo", change: "native-review-authority-parity", lineage: "issue136-contract-runtime", expectedBindingRevision: "" }) },
-		{ body: { ...status, nextRecommended: "unknown" }, invoke: (client: NativeReviewCliV212) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
-		{ body: { ...status, actionContext: { ...(status.actionContext as Record<string, unknown>), allowedEditRoots: [1] } }, invoke: (client: NativeReviewCliV212) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
-		{ body: { ...status, reviewGate: { ...(status.reviewGate as Record<string, unknown>), result: "deny" } }, invoke: (client: NativeReviewCliV212) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
-		{ body: { ...status, reviewTransaction: { ...(status.reviewTransaction as Record<string, unknown>), mode: "ordinary" } }, invoke: (client: NativeReviewCliV212) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
-		{ body: { ...status, reviewTransaction: { ...(status.reviewTransaction as Record<string, unknown>), snapshot: { ...((status.reviewTransaction as Record<string, unknown>).snapshot as Record<string, unknown>), extra: true } } }, invoke: (client: NativeReviewCliV212) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
+		{ body: { ...start, risk_level: "unknown" }, invoke: (client: NativeReviewCliV213) => client.start({ cwd: "/repo" }) },
+		{ body: { ...start, selected_lenses: ["unknown"] }, invoke: (client: NativeReviewCliV213) => client.start({ cwd: "/repo" }) },
+		{ body: { ...finalization, state: "unknown" }, invoke: (client: NativeReviewCliV213) => client.finalize({ cwd: "/repo" }) },
+		{ body: { ...validate, context: { ...(validate.context as Record<string, unknown>), extra: true } }, invoke: (client: NativeReviewCliV213) => client.validate({ cwd: "/repo", gate: "post-apply" }) },
+		{ body: { ...bind, gate_context: { ...(bind.gate_context as Record<string, unknown>), candidate_tree: 1 } }, invoke: (client: NativeReviewCliV213) => client.bindSdd({ cwd: "/repo", change: "native-review-authority-parity", lineage: "issue136-contract-runtime", expectedBindingRevision: "" }) },
+		{ body: { ...status, nextRecommended: "unknown" }, invoke: (client: NativeReviewCliV213) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
+		{ body: { ...status, actionContext: { ...(status.actionContext as Record<string, unknown>), allowedEditRoots: [1] } }, invoke: (client: NativeReviewCliV213) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
+		{ body: { ...status, reviewGate: { ...(status.reviewGate as Record<string, unknown>), result: "deny" } }, invoke: (client: NativeReviewCliV213) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
+		{ body: { ...status, reviewTransaction: { ...(status.reviewTransaction as Record<string, unknown>), mode: "ordinary" } }, invoke: (client: NativeReviewCliV213) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
+		{ body: { ...status, reviewTransaction: { ...(status.reviewTransaction as Record<string, unknown>), snapshot: { ...((status.reviewTransaction as Record<string, unknown>).snapshot as Record<string, unknown>), extra: true } } }, invoke: (client: NativeReviewCliV213) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
 	];
 	for (const item of cases) {
 		const queue = queuedAdapter([VERSION, { stdout: JSON.stringify(item.body) }]);
-		await assert.rejects(() => item.invoke(new NativeReviewCliV212(queue.adapter)), NativeReviewCliError);
+		await assert.rejects(() => item.invoke(new NativeReviewCliV213(queue.adapter)), NativeReviewCliError);
 	}
 });
 
 test("native decoders reject every nested response-field mutation", async () => {
 	const cases = [
-		{ fixtureName: "validate-allow", nestedKey: "context", optionalNestedKeys: ["store_revision", "genesis_revision", "chain_identity", "bundle_digest"], invoke: (client: NativeReviewCliV212) => client.validate({ cwd: "/repo", gate: "post-apply", lineageId: "issue136-contract-runtime" }) },
-		{ fixtureName: "bind-sdd", nestedKey: "gate_context", optionalNestedKeys: ["genesis_revision", "chain_identity", "bundle_digest"], invoke: (client: NativeReviewCliV212) => client.bindSdd({ cwd: "/repo", change: "native-review-authority-parity", lineage: "issue136-contract-runtime", expectedBindingRevision: "" }) },
-		{ fixtureName: "sdd-status", nestedKey: "actionContext", invoke: (client: NativeReviewCliV212) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
-		{ fixtureName: "sdd-status", nestedKey: "reviewGate", invoke: (client: NativeReviewCliV212) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
-		{ fixtureName: "sdd-status", nestedKey: "reviewTransaction", invoke: (client: NativeReviewCliV212) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
-		{ fixtureName: "sdd-status-engram", nestedKey: "artifacts", invoke: (client: NativeReviewCliV212) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
+		{ fixtureName: "validate-allow", nestedKey: "context", optionalNestedKeys: ["store_revision", "genesis_revision", "chain_identity", "bundle_digest"], invoke: (client: NativeReviewCliV213) => client.validate({ cwd: "/repo", gate: "post-apply", lineageId: "issue136-contract-runtime" }) },
+		{ fixtureName: "bind-sdd", nestedKey: "gate_context", optionalNestedKeys: ["genesis_revision", "chain_identity", "bundle_digest"], invoke: (client: NativeReviewCliV213) => client.bindSdd({ cwd: "/repo", change: "native-review-authority-parity", lineage: "issue136-contract-runtime", expectedBindingRevision: "" }) },
+		{ fixtureName: "sdd-status", nestedKey: "actionContext", invoke: (client: NativeReviewCliV213) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
+		{ fixtureName: "sdd-status", nestedKey: "reviewGate", invoke: (client: NativeReviewCliV213) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
+		{ fixtureName: "sdd-status", nestedKey: "reviewTransaction", invoke: (client: NativeReviewCliV213) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
+		{ fixtureName: "sdd-status-engram", nestedKey: "artifacts", invoke: (client: NativeReviewCliV213) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }) },
 	];
 	for (const item of cases) {
 		const body = JSON.parse(await fixture(item.fixtureName)) as Record<string, Record<string, unknown>>;
@@ -277,7 +334,7 @@ test("native decoders reject every nested response-field mutation", async () => 
 			];
 			for (const nested of mutations) {
 				const queue = queuedAdapter([VERSION, { stdout: JSON.stringify({ ...body, [item.nestedKey]: nested }) }]);
-				await assert.rejects(() => item.invoke(new NativeReviewCliV212(queue.adapter)), NativeReviewCliError, `${item.fixtureName}.${item.nestedKey}.${field}`);
+				await assert.rejects(() => item.invoke(new NativeReviewCliV213(queue.adapter)), NativeReviewCliError, `${item.fixtureName}.${item.nestedKey}.${field}`);
 			}
 		}
 	}
@@ -301,7 +358,7 @@ test("native process failures are typed and never authorize mutation", async () 
 			return { stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false, ...scenario.result! };
 		};
 		await assert.rejects(
-			() => new NativeReviewCliV212(adapter).start({ cwd: "/repo" }),
+			() => new NativeReviewCliV213(adapter).start({ cwd: "/repo" }),
 			(error: unknown) => error instanceof NativeReviewCliError && error.code === scenario.code && error.mutationOutcome === "unknown" && error.nextAction === "replay-exact-native-operation",
 		);
 	}
@@ -317,7 +374,7 @@ test("finalize stages every optional document privately and cleans it after fail
 		return { stdout: "{", stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
 	};
 	await assert.rejects(
-		() => new NativeReviewCliV212(adapter).finalize({
+		() => new NativeReviewCliV213(adapter).finalize({
 			cwd: "/repo",
 			lensResults: [{ lens: "review-risk", document: { id: "risk" } }],
 			refuterDocument: { id: "refuter" },
@@ -330,16 +387,16 @@ test("finalize stages every optional document privately and cleans it after fail
 	await Promise.all(observed.filter((argument) => argument.endsWith(".json")).map(async (path) => assert.rejects(() => import("node:fs/promises").then(({ stat }) => stat(path)))));
 });
 async function fixture(name: string): Promise<string> {
-	return readFile(new URL(`./fixtures/native-review-cli/v2.1.2/${name}.json`, import.meta.url), "utf8");
+	return readFile(new URL(`./fixtures/native-review-cli/v2.1.3/${name}.json`, import.meta.url), "utf8");
 }
 
 test("finalize ignores injected cleanup failures after native completion", async () => {
 	for (const native of [{ stdout: await fixture("finalize") }, { stdout: "{" }]) {
 		let cleanupAttempts = 0;
 		const queue = queuedAdapter([VERSION, native]);
-		const client = new NativeReviewCliV212(
+		const client = new NativeReviewCliV213(
 			queue.adapter,
-			"gentle-ai",
+			"/package/.gentle-ai/v2.1.3/gentle-ai",
 			30_000,
 			1024 * 1024,
 			async () => {
@@ -372,14 +429,14 @@ test("finalize cleanup survives every native exit path", async () => {
 			for (const argument of request.arguments) if (argument.includes("gentle-ai-finalize-")) staged.push(argument);
 			return { stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false, ...result };
 		};
-		const finalize = () => new NativeReviewCliV212(adapter).finalize({ cwd: "/repo", lensResults: [{ lens: "review-risk", document: { id: "risk" } }], refuterDocument: { id: "refuter" }, validationDocument: { id: "validation" }, evidenceDocument: "evidence" });
+		const finalize = () => new NativeReviewCliV213(adapter).finalize({ cwd: "/repo", lensResults: [{ lens: "review-risk", document: { id: "risk" } }], refuterDocument: { id: "refuter" }, validationDocument: { id: "validation" }, evidenceDocument: "evidence" });
 		if (result.exitCode === 1 || result.timedOut || result.stdout === "{") await assert.rejects(finalize, NativeReviewCliError);
 		else await finalize();
 		await Promise.all(staged.filter((path) => path.endsWith(".json")).map(async (path) => assert.rejects(() => import("node:fs/promises").then(({ stat }) => stat(path)))));
 	}
 });
 
-test("native client decodes all checked-in v2.1.2 success fixtures", async () => {
+test("native client rejects historical v2.1.3 START while decoding compatible fixtures", async () => {
 	const queue = queuedAdapter([
 		VERSION,
 		{ stdout: await fixture("start") },
@@ -392,8 +449,8 @@ test("native client decodes all checked-in v2.1.2 success fixtures", async () =>
 		VERSION,
 		{ stdout: await fixture("sdd-status") },
 	]);
-	const client = new NativeReviewCliV212(queue.adapter);
-	assert.equal((await client.start({ cwd: "/repo", lineageId: "lineage-1" })).lineageId, "lineage-1");
+	const client = new NativeReviewCliV213(queue.adapter);
+	await assert.rejects(() => client.start({ cwd: "/repo", lineageId: "lineage-1" }), NativeReviewCliError);
 	const finalized = await client.finalize({ cwd: "/repo", lineageId: "lineage-1" });
 	assert.match(finalized.storeRevision, /^sha256:[0-9a-f]{64}$/);
 	assert.equal(finalized.action, "validate delivery with gentle-ai review validate --gate <gate>");
@@ -416,7 +473,7 @@ test("native SDD readiness requires an unblocked post-review action with publish
 			};
 			const queue = queuedAdapter([VERSION, { stdout: JSON.stringify(body) }]);
 			assert.equal(
-				(await new NativeReviewCliV212(queue.adapter).sddStatus({ cwd: "/repo", change: "native-review-authority-parity" })).ready,
+				(await new NativeReviewCliV213(queue.adapter).sddStatus({ cwd: "/repo", change: "native-review-authority-parity" })).ready,
 				nextRecommended === "verify" || nextRecommended === "archive",
 				`${source.artifactStore as string}:${nextRecommended}`,
 			);
@@ -430,13 +487,13 @@ test("native SDD readiness requires an unblocked post-review action with publish
 		{ ...openspec, nextRecommended: "archive", blockedReasons: [], reviewGate: { result: "invalidated", reason: "authority is stale" } },
 	]) {
 		const queue = queuedAdapter([VERSION, { stdout: JSON.stringify(body) }]);
-		assert.equal((await new NativeReviewCliV212(queue.adapter).sddStatus({ cwd: "/repo", change: "native-review-authority-parity" })).ready, false);
+		assert.equal((await new NativeReviewCliV213(queue.adapter).sddStatus({ cwd: "/repo", change: "native-review-authority-parity" })).ready, false);
 	}
 });
 
-test("native client decodes the exact v2.1.2 Engram artifact map", async () => {
+test("native client decodes the exact v2.1.3 Engram artifact map", async () => {
 	const queue = queuedAdapter([VERSION, { stdout: await fixture("sdd-status-engram") }]);
-	const status = await new NativeReviewCliV212(queue.adapter).sddStatus({ cwd: "/repo", change: "native-review-authority-parity" });
+	const status = await new NativeReviewCliV213(queue.adapter).sddStatus({ cwd: "/repo", change: "native-review-authority-parity" });
 	assert.equal(status.artifactStore, "engram");
 	assert.equal(status.artifacts.reviewPolicy, "done");
 	assert.equal(status.ready, false);
@@ -444,7 +501,7 @@ test("native client decodes the exact v2.1.2 Engram artifact map", async () => {
 
 test("native client decodes the exact published non-allow result and rejects stale aliases", async () => {
 	const queue = queuedAdapter([VERSION, { stdout: await fixture("validate-deny"), stderr: "Error: review gate denied: scope-changed\n", exitCode: 1 }]);
-	const result = await new NativeReviewCliV212(queue.adapter).validate({ cwd: "/repo", gate: "post-apply", lineageId: "issue136-contract-runtime" });
+	const result = await new NativeReviewCliV213(queue.adapter).validate({ cwd: "/repo", gate: "post-apply", lineageId: "issue136-contract-runtime" });
 	assert.equal(result.result, "scope-changed");
 	assert.equal(result.allowed, false);
 	assert.equal(result.action, "create-new-lineage");
@@ -454,7 +511,7 @@ test("native client decodes the exact published non-allow result and rejects sta
 		{ schema: "gentle-ai.review-sdd-binding/v1", repository: "repo", change: "native-review-authority-parity", path: "openspec/changes/native-review-authority-parity", lineage_id: "issue136-contract-runtime", authority_revision: "revision", receipt_hash: "receipt", binding_revision: "binding", gate_context: {} },
 	]) {
 		const staleQueue = queuedAdapter([VERSION, { stdout: JSON.stringify(stale) }]);
-		const client = new NativeReviewCliV212(staleQueue.adapter);
+		const client = new NativeReviewCliV213(staleQueue.adapter);
 		await assert.rejects(
 			() => "result" in stale
 				? client.validate({ cwd: "/repo", gate: "post-apply", lineageId: "issue136-contract-runtime" })
@@ -472,10 +529,10 @@ test("native client rejects mutations, trailing JSON, and process uncertainty", 
 		{ ...start, changed_lines: Number.MAX_SAFE_INTEGER + 1 },
 	]) {
 		const queue = queuedAdapter([VERSION, { stdout: JSON.stringify(body) }]);
-		await assert.rejects(() => new NativeReviewCliV212(queue.adapter).start({ cwd: "/repo" }), NativeReviewCliError);
+		await assert.rejects(() => new NativeReviewCliV213(queue.adapter).start({ cwd: "/repo" }), NativeReviewCliError);
 	}
 	const trailing = queuedAdapter([VERSION, { stdout: `${await fixture("start")} {}` }]);
-	await assert.rejects(() => new NativeReviewCliV212(trailing.adapter).start({ cwd: "/repo" }), NativeReviewCliError);
+	await assert.rejects(() => new NativeReviewCliV213(trailing.adapter).start({ cwd: "/repo" }), NativeReviewCliError);
 	for (const result of [
 		{ stdout: "", stderr: "missing", exitCode: 1 },
 		{ stdout: await fixture("start"), stderr: "warning" },
@@ -483,7 +540,7 @@ test("native client rejects mutations, trailing JSON, and process uncertainty", 
 	]) {
 		const queue = queuedAdapter([VERSION, result]);
 		await assert.rejects(
-			() => new NativeReviewCliV212(queue.adapter).start({ cwd: "/repo" }),
+			() => new NativeReviewCliV213(queue.adapter).start({ cwd: "/repo" }),
 			(error: unknown) => error instanceof NativeReviewCliError && error.mutationOutcome === "unknown",
 		);
 	}
@@ -494,13 +551,13 @@ test("native client rejects extra fields in finalize, bind, and bound SDD status
 	const bind = JSON.parse(await fixture("bind-sdd")) as Record<string, unknown>;
 	const status = JSON.parse(await fixture("sdd-status")) as Record<string, unknown>;
 	const cases = [
-		{ invoke: (client: NativeReviewCliV212) => client.finalize({ cwd: "/repo", lineageId: "lineage-1" }), body: { ...finalize, extra: true } },
-		{ invoke: (client: NativeReviewCliV212) => client.bindSdd({ cwd: "/repo", change: "native-review-authority-parity", lineage: "lineage-1", expectedBindingRevision: "" }), body: { ...bind, extra: true } },
-		{ invoke: (client: NativeReviewCliV212) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }), body: { ...status, extra: true } },
+		{ invoke: (client: NativeReviewCliV213) => client.finalize({ cwd: "/repo", lineageId: "lineage-1" }), body: { ...finalize, extra: true } },
+		{ invoke: (client: NativeReviewCliV213) => client.bindSdd({ cwd: "/repo", change: "native-review-authority-parity", lineage: "lineage-1", expectedBindingRevision: "" }), body: { ...bind, extra: true } },
+		{ invoke: (client: NativeReviewCliV213) => client.sddStatus({ cwd: "/repo", change: "native-review-authority-parity" }), body: { ...status, extra: true } },
 	];
 	for (const item of cases) {
 		const queue = queuedAdapter([VERSION, { stdout: JSON.stringify(item.body) }]);
-		await assert.rejects(() => item.invoke(new NativeReviewCliV212(queue.adapter)), NativeReviewCliError);
+		await assert.rejects(() => item.invoke(new NativeReviewCliV213(queue.adapter)), NativeReviewCliError);
 	}
 });
 
@@ -521,7 +578,7 @@ test("native finalize stages ordered private result documents and removes them a
 		}
 		return { stdout: await fixture("finalize"), stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
 	};
-	await new NativeReviewCliV212(adapter).finalize({
+	await new NativeReviewCliV213(adapter).finalize({
 		cwd: "/repo",
 		lineageId: "lineage-1",
 		lensResults: [{ lens: "review-risk", document: { lens: "risk", findings: [], evidence: ["complete candidate reviewed"] } }],
@@ -545,7 +602,7 @@ test("native finalize stages ordered private result documents and removes them a
 test("native finalize rejects only zero-length staged evidence before launch", async () => {
 	const queue = queuedAdapter([]);
 	await assert.rejects(
-		() => new NativeReviewCliV212(queue.adapter).finalize({ cwd: "/repo", evidenceDocument: "" }),
+		() => new NativeReviewCliV213(queue.adapter).finalize({ cwd: "/repo", evidenceDocument: "" }),
 		TypeError,
 	);
 	assert.equal(queue.calls.length, 0);
@@ -553,13 +610,13 @@ test("native finalize rejects only zero-length staged evidence before launch", a
 
 test("native cancellation fails closed and preserves mutating ambiguity", async () => {
 	const adapter: ExecFileAdapter = async (request) => {
-		if (request.arguments[0] === "version") return { stdout: "gentle-ai 2.1.2\n", stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
+		if (request.arguments[0] === "version") return { stdout: "gentle-ai 2.1.4\n", stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
 		const error = new Error("cancelled");
 		error.name = "AbortError";
 		throw error;
 	};
 	await assert.rejects(
-		() => new NativeReviewCliV212(adapter).start({ cwd: "/repo" }),
+		() => new NativeReviewCliV213(adapter).start({ cwd: "/repo" }),
 		(error: unknown) => error instanceof NativeReviewCliError
 			&& error.code === NATIVE_REVIEW_ERROR_CODE.CANCELLED
 			&& error.mutationOutcome === "unknown"
@@ -578,7 +635,7 @@ test("native adapter receives the controller AbortSignal and preserves mutating 
 	const controller = new AbortController();
 	controller.abort();
 	const adapter: ExecFileAdapter = async (request) => {
-		if (request.arguments[0] === "version") return { stdout: "gentle-ai 2.1.2\n", stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
+		if (request.arguments[0] === "version") return { stdout: "gentle-ai 2.1.4\n", stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
 		if (request.signal?.aborted) {
 			const error = new Error("cancelled");
 			error.name = "AbortError";
@@ -587,7 +644,7 @@ test("native adapter receives the controller AbortSignal and preserves mutating 
 		throw new Error("missing AbortSignal");
 	};
 	await assert.rejects(
-		() => new NativeReviewCliV212(adapter).start({ cwd: "/repo", signal: controller.signal }),
+		() => new NativeReviewCliV213(adapter).start({ cwd: "/repo", signal: controller.signal }),
 		(error: unknown) => error instanceof NativeReviewCliError
 			&& error.code === NATIVE_REVIEW_ERROR_CODE.CANCELLED
 			&& error.mutationOutcome === "unknown"
